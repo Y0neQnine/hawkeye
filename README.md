@@ -289,7 +289,6 @@ hawkeye sync-rules                     # 升级后把新增的内置 POC 补进�
 | `hawkeye-darwin-amd64` / `hawkeye-darwin-arm64` | Intel Mac / Apple 芯片 Mac |
 | `hawkeye-windows-amd64.exe` | Windows 10 / 11 / Server 2016+ 64 位 |
 
-五个单文件的 sha256 列在 [`使用说明.md` 第一节](使用说明.md)，下载后请先核对再运行。
 
 ---
 
