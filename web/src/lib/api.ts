@@ -1,0 +1,1148 @@
+// Real backend client. /api/* is proxied to the Go backend (next.config rewrites).
+// Returns the domain types in lib/types.ts. Shapes match the backend handlers;
+// a few fields the backend serializes differently (e.g. created_at as a unix int)
+// are passed through and formatted at the call site.
+
+import type { ChatMention } from "@/lib/chat-mentions";
+import { MOCK } from "@/lib/mock/enabled";
+import { mockHandle } from "@/lib/mock/handler";
+import type {
+  Activity,
+  Agent,
+  AgentDetail,
+  AgentTrigger,
+  ArchiveBatchItem,
+  Asset,
+  AssetImportResult,
+  AssetInterceptRule,
+  AssetInterceptRuleInput,
+  Audit,
+  BatchCategoryItem,
+  BatchControlItem,
+  ChatAttachment,
+  CommandRecord,
+  Company,
+  CompanyScopeMutation,
+  CompanyScopeRule,
+  Conversation,
+  ConvTokenSummary,
+  CoverageAssetRefs,
+  CoverageGraphData,
+  DailyTokenBucket,
+  DeleteTaskOptions,
+  DeleteTaskResult,
+  Edge,
+  ExplorationNodePage,
+  ExplorationNodeQuery,
+  IntentAsset,
+  InterceptApprovalFilter,
+  InterceptApprovalRow,
+  InterceptDetail,
+  InterceptPending,
+  InterceptRule,
+  JudgeConfig,
+  JudgeUsage,
+  LLMPoolStatus,
+  LLMProfile,
+  LLMRecordDetail,
+  LLMRecordItem,
+  LLMRetryOverride,
+  LLMRetryPolicy,
+  LLMTask,
+  MCPServer,
+  MCPTool,
+  MissingSkill,
+  MonitorChange,
+  MonitorChangeQuery,
+  MonitorOverview,
+  MonitorRun,
+  MonitorTrendPoint,
+  ModelTokenStat,
+  PromptVar,
+  PromptVersion,
+  SessionTokenUsage,
+  Settings,
+  SkillCall,
+  SkillItem,
+  SSProject,
+  SSTask,
+  Stats,
+  Task,
+  TaskArchive,
+  TaskArchivePage,
+  TaskAssetMutation,
+  TaskAssetScopeMutation,
+  TaskCategory,
+  TaskConstraint,
+  TaskGoal,
+  TaskLLMResolutions,
+  TaskNode,
+  TaskScopeRow,
+  TaskTemplate,
+  TokenTotal,
+  TokenUsage,
+  Tool,
+  ToolStat,
+  TrafficDetail,
+  TrafficHost,
+  TrafficResp,
+  UsageStats,
+  WorkspaceFile,
+  WorkspaceListing,
+} from "@/lib/types";
+
+function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("artex_token");
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objUrl);
+}
+
+export async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
+  const token = getToken();
+  const r = await fetch(`/api${path}`, {
+    ...init,
+    headers: {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers as Record<string, string> | undefined),
+    },
+  });
+  if (r.status === 401) {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("artex_token");
+      document.cookie = "artex_token=; path=/; max-age=0";
+      window.location.href = "/login";
+    }
+    throw new Error("未授权");
+  }
+  if (!r.ok) {
+    const fallback = `${init?.method ?? "GET"} ${path}: ${r.status}`;
+    let message = fallback;
+    try {
+      const payload = (await r.json()) as { error?: unknown };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        message = payload.error.trim();
+      }
+    } catch {
+      // Keep the status-based fallback for empty or non-JSON error responses.
+    }
+    throw new Error(message);
+  }
+  if (r.status === 204) return undefined as T;
+  return r.json();
+}
+
+// sseUrl builds a URL for Server-Sent Events streams.
+//
+// Production (static export / Docker): the Go backend serves the web UI *and* the
+// SSE streams on the same port, so we default to a same-origin (relative) URL.
+// This is what makes reverse-proxy deploys work: a page loaded from
+// https://<domain>/ connects to https://<domain>/api/..., which the proxy forwards
+// to the backend — no need to expose :8000 publicly. Hardcoding :8000 here used to
+// break exactly that (https://<domain>:8000/... is unreachable when only 443 is open).
+//
+// Dev (next dev): SSE must NOT go through the Next.js `/api` rewrite — that proxy
+// buffers the streamed response, so event frames never reach the browser (the
+// EventSource opens but receives 0 messages). So in dev only we connect straight
+// to the Go backend on :8000, whose CORS is open.
+//
+// Override either default with NEXT_PUBLIC_SSE_BASE (set it to "" to force same-origin).
+// Token is appended as ?token= because SSE can't carry cookies cross-origin.
+export function sseUrl(path: string): string {
+  const base =
+    process.env.NEXT_PUBLIC_SSE_BASE ??
+    (process.env.NODE_ENV !== "production" && typeof window !== "undefined"
+      ? `${window.location.protocol}//${window.location.hostname}:8000`
+      : "");
+  const token = getToken();
+  const sep = path.includes("?") ? "&" : "?";
+  return token ? `${base}${path}${sep}token=${encodeURIComponent(token)}` : `${base}${path}`;
+}
+
+const get = <T>(p: string) => http<T>(p);
+const post = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+const put = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
+const patch = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
+const del = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
+
+// Go serializes nil slices as JSON null — coerce to [].
+const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
+const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
+
+function interceptPageQuery(page: number, size: number, filter: InterceptApprovalFilter) {
+  const query = new URLSearchParams({ page: String(page), size: String(size) });
+  if (filter.status) query.set("status", filter.status);
+  if (filter.decision_source) query.set("decision_source", filter.decision_source);
+  return query.toString();
+}
+
+export const api = {
+  // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
+  health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
+
+  // ---- auth ----
+  authStatus: () => get<{ initialized: boolean }>("/auth/status"),
+  login: (username: string, password: string) => post<{ token: string }>("/auth/login", { username, password }),
+  initPassword: (password: string) => post<{ token: string }>("/auth/init", { password }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    post<{ ok: boolean }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
+
+  // ---- tasks ----
+  tasks: () =>
+    get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
+  task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
+  createTask: (input: {
+    name?: string;
+    categoryId?: number;
+    description: string;
+    goal: string;
+    llmProfileIds?: number[];
+    sourceTaskIds?: string[];
+    companyIds?: number[];
+    timeoutSeconds?: number;
+    seedFirstIntent?: boolean;
+    planHeartbeatSeconds?: number;
+    coverageEnabled?: boolean;
+    assetsOnly?: boolean;
+    interceptRules?: AssetInterceptRuleInput[];
+  }) =>
+    post<Task>("/tasks", {
+      name: input.name ?? "",
+      category_id: input.categoryId ?? null,
+      description: input.description,
+      goal: input.goal,
+      llm_profile_ids: input.llmProfileIds ?? [],
+      source_task_ids: input.sourceTaskIds ?? [],
+      company_ids: input.companyIds ?? [],
+      timeout_seconds: input.timeoutSeconds ?? 0,
+      seed_first_intent: input.seedFirstIntent ?? false,
+      plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
+      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      assets_only: input.assetsOnly ?? false, // 默认关;true=只采资产,不采集路径/端点
+      intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
+    }),
+  taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
+  updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
+  renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
+  pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
+  createTaskCategory: (name: string) => post<TaskCategory>("/task-categories", { name }),
+  renameTaskCategory: (id: number, name: string) => patch<TaskCategory>(`/task-categories/${id}`, { name }),
+  deleteTaskCategory: (id: number) => del<{ deleted: number }>(`/task-categories/${id}`),
+  updateTaskCategory: (taskId: string, categoryId?: number) =>
+    patch<Task>(`/tasks/${taskId}/category`, { category_id: categoryId ?? null }),
+  // categoryId 省略/undefined = 移出分类（后端收到 null）
+  updateTasksCategory: (taskIds: string[], categoryId?: number) =>
+    post<{ items: BatchCategoryItem[]; category: TaskCategory | null }>("/tasks/category/batch", {
+      task_ids: taskIds,
+      category_id: categoryId ?? null,
+    }),
+  taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
+  createTaskTemplate: (
+    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+  ) => post<TaskTemplate>("/task-templates", input),
+  updateTaskTemplate: (
+    id: number,
+    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+  ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
+  deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
+  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
+    put<{
+      id: string;
+      llm_profile_ids: number[];
+      active_llm_profile_id?: number;
+      llm_failover_state: string;
+      reopened_intents: number;
+      switch_event?: Activity;
+    }>(`/tasks/${id}/llm`, {
+      llm_profile_ids: llmProfileIds,
+      active_llm_profile_id: activeLLMProfileId ?? null,
+    }),
+  deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
+  controlTask: (id: string, action: "pause" | "resume") =>
+    post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+  controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
+    post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
+  taskArchives: (input?: { page?: number; size?: number; q?: string; state?: string }) => {
+    const query = new URLSearchParams();
+    query.set("page", String(input?.page ?? 1));
+    query.set("size", String(input?.size ?? 20));
+    if (input?.q) query.set("q", input.q);
+    if (input?.state) query.set("state", input.state);
+    return get<TaskArchivePage>(`/task-archives?${query.toString()}`).then((response) => ({
+      ...response,
+      items: arr(response.items),
+    }));
+  },
+  taskArchive: (id: number) => get<TaskArchive>(`/task-archives/${id}`),
+  archiveTask: (id: string) => post<TaskArchive>(`/tasks/${id}/archive`),
+  archiveTasks: (taskIds: string[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/tasks/archive/batch", { task_ids: taskIds }),
+  restoreTaskArchive: (id: number) => post<TaskArchive>(`/task-archives/${id}/restore`),
+  restoreTaskArchives: (archiveIds: number[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/task-archives/restore/batch", { archive_ids: archiveIds }),
+  deleteTaskArchive: (id: number) => del<TaskArchive>(`/task-archives/${id}`),
+  deleteTaskArchives: (archiveIds: number[]) =>
+    post<{ items: ArchiveBatchItem[] }>("/task-archives/delete/batch", { archive_ids: archiveIds }),
+  controlIntent: (
+    taskId: string,
+    intentId: string,
+    action: "pause" | "resume" | "cancel",
+    reason?: string,
+    // cancel 专用:soft(默认,假删除,意图置 deleted + 记删除原因)| hard(真删除,级联移除独占子孙)。
+    mode?: "soft" | "hard",
+  ) =>
+    post<{
+      id: number;
+      state: "paused" | "open" | "deleted" | "";
+      deleted?: { intents: number; facts: number; activities: number };
+    }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "", mode: mode ?? "soft" }),
+  sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>
+    post<{
+      id: number;
+      state: "running";
+      accepted: true;
+      request_id: string;
+    }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId }),
+  taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
+  // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
+  rerunIntent: (taskId: string, intentId: string) =>
+    post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),
+  // 批量重跑本任务全部 blocked 意图（一次网络/LLM 断连导致多条 blocked 时一键全部重试）。
+  rerunBlocked: (taskId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/rerun-blocked`),
+  setActive: (id: string) => post<{ active: string }>("/active", { id }),
+  // ---- stats ----
+  stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
+  taskCoverage: (id: string) =>
+    get<{
+      enabled: boolean; // 资产覆盖度功能是否开启；false 时其余字段为零值
+      scope_rows: number;
+      denominator: number;
+      tested: number;
+      pct: number | null;
+      by_type: { type: string; total: number; tested: number }[];
+    }>(`/tasks/${id}/coverage`),
+  // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
+  taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
+  usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
+  // ---- 目标管理（总览）----
+  // 本任务全部目标（text/vulnclass/state）。
+  taskGoals: (id: string) =>
+    get<{ goals: TaskGoal[] | null }>(`/tasks/${id}/goals`).then((response) => ({ goals: arr(response.goals) })),
+  // 人工新增目标：写入图谱并通知 planner、复活任务。
+  addGoal: (id: string, text: string) => post<TaskGoal>(`/tasks/${id}/goals`, { text }),
+  // 人工修改目标文本：通知 planner「由 old 变为 new」、复活任务。
+  updateGoal: (id: string, goalId: string, text: string) =>
+    patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text }),
+  // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
+  deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+
+  // ---- 操作约束管理（总览）----
+  // 本任务全部操作约束（allow/deny）。
+  taskConstraints: (id: string) =>
+    get<{ constraints: TaskConstraint[] | null }>(`/tasks/${id}/constraints`).then((response) => ({
+      constraints: arr(response.constraints),
+    })),
+  // 新增约束（不通知 planner，下一轮规划自然读到）。
+  addConstraint: (id: string, text: string, kind: TaskConstraint["kind"]) =>
+    post<TaskConstraint>(`/tasks/${id}/constraints`, { text, kind }),
+  // 修改约束（文本 + allow/deny）。
+  updateConstraint: (id: string, constraintId: string, text: string, kind: TaskConstraint["kind"]) =>
+    patch<TaskConstraint>(`/tasks/${id}/constraints/${constraintId}`, { text, kind }),
+  // 删除约束。
+  deleteConstraint: (id: string, constraintId: string) =>
+    del<{ ok: boolean }>(`/tasks/${id}/constraints/${constraintId}`),
+
+  // ---- 任务级资产拦截/允许规则（总览）----
+  taskInterceptRules: (id: string) =>
+    get<{ rules: AssetInterceptRule[] | null }>(`/tasks/${id}/intercept-rules`).then((r) => arr(r.rules)),
+  createTaskInterceptRule: (id: string, rule: AssetInterceptRuleInput) =>
+    post<AssetInterceptRule>(`/tasks/${id}/intercept-rules`, rule),
+  updateTaskInterceptRule: (id: string, ruleId: number, rule: AssetInterceptRuleInput) =>
+    put<AssetInterceptRule>(`/tasks/${id}/intercept-rules/${ruleId}`, rule),
+  deleteTaskInterceptRule: (id: string, ruleId: number) =>
+    del<{ deleted: boolean }>(`/tasks/${id}/intercept-rules/${ruleId}`),
+  toggleTaskInterceptRule: (id: string, ruleId: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/tasks/${id}/intercept-rules/${ruleId}/toggle`, { enabled }),
+
+  // 本任务测试范围列表（含继承自来源任务的范围）。
+  taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
+  // 手动新增一条测试范围（kind=company/root_domain/subdomain/ip/cidr）。
+  addTaskScope: (id: string, kind: string, value: string, reason?: string) =>
+    post<TaskScopeRow>(`/tasks/${id}/scope`, { kind, value, reason }),
+  // 删除本任务的一条测试范围。
+  deleteTaskScope: (id: string, scopeId: number) => del<{ ok: boolean }>(`/tasks/${id}/scope/${scopeId}`),
+  // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
+  taskAssetRefs: (id: string, assetId: number) => get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
+
+  // ---- workspace file manager (workDir) ----
+  workspaceList: (path = "") => get<WorkspaceListing>(`/workspace/list?path=${encodeURIComponent(path)}`),
+  workspaceRead: (path: string) => get<WorkspaceFile>(`/workspace/read?path=${encodeURIComponent(path)}`),
+  workspaceWrite: (path: string, content: string) =>
+    post<{ ok: boolean; path: string }>(`/workspace/write`, { path, content }),
+  workspaceMkdir: (path: string) => post<{ ok: boolean; path: string }>(`/workspace/mkdir`, { path }),
+  workspaceDelete: (path: string) => del<{ ok: boolean }>(`/workspace/delete?path=${encodeURIComponent(path)}`),
+  workspaceUpload: async (dir: string, files: File[]) => {
+    if (MOCK) return { uploaded: files.length };
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f);
+    const token = getToken();
+    const r = await fetch(`/api/workspace/upload?path=${encodeURIComponent(dir)}`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`上传失败: ${r.status}`);
+    return r.json() as Promise<{ uploaded: number }>;
+  },
+  workspaceDownload: async (path: string) => {
+    let blob: Blob;
+    if (MOCK) {
+      blob = new Blob([`（demo）${path} 的下载内容示例。`], { type: "text/plain" });
+    } else {
+      const token = getToken();
+      const r = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      if (!r.ok) throw new Error(`下载失败: ${r.status}`);
+      blob = await r.blob();
+    }
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = path.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objUrl);
+  },
+
+  // ---- 攻击面持续监控 ----
+  // 概览：资产总量/类型分布、公司数、最近批次与 24h/7d 变更计数。
+  monitorOverview: () => get<MonitorOverview>("/monitor/overview"),
+  // 快照批次列表（默认最新在前），含每批新增/消失/变更计数。
+  monitorRuns: (limit = 20, offset = 0) =>
+    get<{ runs: MonitorRun[]; total: number }>(`/monitor/runs?limit=${limit}&offset=${offset}`).then((r) => ({
+      runs: arr(r.runs),
+      total: r.total ?? 0,
+    })),
+  // 某批次（或全部批次）的资产变更明细。
+  monitorChanges: (q: MonitorChangeQuery = {}) => {
+    const p = new URLSearchParams();
+    if (q.run_id) p.set("run_id", String(q.run_id));
+    if (q.company_id) p.set("company_id", String(q.company_id));
+    if (q.change_type && q.change_type !== "all") p.set("change_type", q.change_type);
+    if (q.asset_type && q.asset_type !== "all") p.set("asset_type", q.asset_type);
+    if (q.q) p.set("q", q.q);
+    p.set("limit", String(q.limit ?? 50));
+    p.set("offset", String(q.offset ?? 0));
+    return get<{ changes: MonitorChange[]; total: number }>(`/monitor/changes?${p.toString()}`).then((r) => ({
+      changes: arr(r.changes),
+      total: r.total ?? 0,
+    }));
+  },
+  // 按天的变更趋势（新增/消失/变更）。
+  monitorTrend: (days = 30) =>
+    get<{ points: MonitorTrendPoint[] }>(`/monitor/trend?days=${days}`).then((r) => arr(r.points)),
+  // 立即执行一次全量快照（手动触发）。
+  monitorSnapshot: () => post<MonitorRun>("/monitor/snapshot"),
+  // 删除一个快照批次（快照与变更记录级联删除）。
+  deleteMonitorRun: (id: number) => del<{ deleted: number }>(`/monitor/runs/${id}`),
+
+  // ---- assets ----
+  // Server-side paginated: pass limit/offset, get back the page + full match total.
+  // companyId scopes both list and DSL search to one company's assets.
+  assets: (type = "", limit = 50, offset = 0, companyId?: number) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?type=${type}&limit=${limit}&offset=${offset}${companyId ? `&company_id=${companyId}` : ""}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  searchAssets: (dsl: string, type = "", limit = 50, offset = 0, companyId?: number) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?dsl=${encodeURIComponent(dsl)}${type ? `&type=${encodeURIComponent(type)}` : ""}&limit=${limit}&offset=${offset}${companyId ? `&company_id=${companyId}` : ""}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  assetCounts: (taskId = "", companyId?: number) =>
+    get<Record<string, number>>(
+      `/assets/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : companyId ? `?company_id=${companyId}` : ""}`,
+    ),
+  deleteAssets: (ids: number[]) =>
+    http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
+  exportAssets: async (opts: { companyId?: number; taskId?: string; type?: string; dsl?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.companyId) params.set("company_id", String(opts.companyId));
+    if (opts.taskId) params.set("task_id", opts.taskId);
+    if (opts.type) params.set("type", opts.type);
+    if (opts.dsl) params.set("dsl", opts.dsl);
+    const qs = params.toString();
+    if (MOCK) {
+      const blob = new Blob(["type,domain\n"], { type: "text/csv" });
+      triggerDownload(blob, "assets-demo.csv");
+      return;
+    }
+    const token = getToken();
+    const r = await fetch(`/api/assets/export${qs ? `?${qs}` : ""}`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    });
+    if (!r.ok) throw new Error(`导出失败: ${r.status}`);
+    const disposition = r.headers.get("Content-Disposition") ?? "";
+    const match = /filename="([^"]+)"/.exec(disposition);
+    triggerDownload(await r.blob(), match?.[1] ?? "assets.csv");
+  },
+  importAssets: async (content: string, companyId?: number) => {
+    if (MOCK) return { imported: 0, failed: 0, company_id: companyId ?? 0, attached: 0, errors: [] };
+    const token = getToken();
+    const r = await fetch(`/api/assets/import${companyId ? `?company_id=${companyId}` : ""}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: content,
+    });
+    if (!r.ok) {
+      let message = `导入失败: ${r.status}`;
+      try {
+        const payload = (await r.json()) as { error?: unknown };
+        if (typeof payload.error === "string" && payload.error.trim()) message = payload.error.trim();
+      } catch {
+        // keep the status fallback
+      }
+      throw new Error(message);
+    }
+    return r.json() as Promise<AssetImportResult>;
+  },
+  // task-scoped view of the same endpoint — server-side paginated like `assets`
+  taskAssets: (taskId: string, type = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  // DSL search scoped to a task — the backend forces the task_id filter, so it
+  // always stays within that task's assets (same DSL grammar as `searchAssets`).
+  searchTaskAssets: (taskId: string, dsl: string, type = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?task_id=${encodeURIComponent(taskId)}&dsl=${encodeURIComponent(dsl)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
+    post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
+      asset_ids: assetIds,
+      source_summary: sourceSummary,
+    }),
+  registerTaskAssetScopes: (taskId: string, scope: CompanyScopeRule[]) =>
+    post<TaskAssetScopeMutation>(`/tasks/${taskId}/assets`, { scope }),
+  detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
+  taskIntentAssets: (taskId: string) =>
+    get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
+
+  // ---- companies (企业 + 资产范围；归属唯一来源) ----
+  companies: () => get<Company[]>("/companies").then(arr),
+  createCompany: (name: string, scope: CompanyScopeRule[]) =>
+    post<{ id: number; created: boolean; scope_added?: number; scope_invalid?: number; scope_errors?: string[] }>(
+      "/companies",
+      {
+        name,
+        scope,
+      },
+    ),
+  addCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
+      scope,
+      reason,
+    }),
+  updateCompanyScope: (id: number, scope: CompanyScopeRule[], reason = "") =>
+    post<CompanyScopeMutation>(`/companies/${id}/scope`, {
+      scope,
+      reason,
+      reset: true,
+    }),
+  deleteCompany: (id: number, deleteAssets = false) =>
+    http<{ deleted: number; assets_deleted: number }>(`/companies/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ delete_assets: deleteAssets }),
+    }),
+
+  // ---- exploration (per task) ----
+  frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),
+  intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
+  tokenStats: (task?: string) =>
+    get<{ workers: TokenUsage[]; sessions: SessionTokenUsage[]; total: TokenTotal }>(
+      `/exploration/tokens${tq(task)}`,
+    ).then((r) => ({
+      workers: arr(r.workers),
+      sessions: arr(r.sessions),
+      total: r.total,
+    })),
+  tokenDaily: (days = 30) => get<DailyTokenBucket[]>(`/tokens/daily?days=${days}`).then(arr),
+  conversationTokens: () =>
+    get<ConvTokenSummary[]>("/tokens/conversations")
+      .then(arr)
+      .catch(() => [] as ConvTokenSummary[]),
+  explorationGraph: (task?: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/graph${tq(task)}`),
+  // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
+  explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {
+    const q = new URLSearchParams();
+    if (task) q.set("task", task);
+    q.set("page", String(query.page ?? 1));
+    q.set("size", String(query.size ?? 20));
+    if (query.kinds?.length) q.set("kind", query.kinds.join(","));
+    if (query.states?.length) q.set("state", query.states.join(","));
+    if (query.q?.trim()) q.set("q", query.q.trim());
+    if (query.order === "asc") q.set("order", "asc");
+    return get<ExplorationNodePage>(`/exploration/nodes?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? 0,
+      page: r.page ?? 1,
+      size: r.size ?? query.size ?? 20,
+      edges: arr(r.edges),
+      refs: r.refs ?? {},
+      assets: r.assets ?? {},
+    }));
+  },
+  activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (task) q.set("task", task);
+    if (opts?.intent) q.set("intent", opts.intent);
+    if (opts?.since) q.set("since", String(opts.since));
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    return get<{ items: Activity[]; cursor: number }>(`/exploration/activity?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      cursor: r.cursor ?? 0,
+    }));
+  },
+  activityDetail: (id: number, task?: string) => get<{ detail: string }>(`/exploration/activity/${id}${tq(task)}`),
+  // Reverse-paginated session history. session = "main" | "plan" | "intent:<id>".
+  // before=0 → latest page; before=<id> → the older page ending before that id.
+  // snapshotCursor is the TASK-level max id at query time — open the task SSE at
+  // since=snapshotCursor so history (id≤cursor) and the live tail (id>cursor) meet
+  // gap-free. hasMore = still-older steps exist (drives scroll-up loading).
+  activityHistory: (task: string, session: string, before = 0, limit = 200) => {
+    const q = new URLSearchParams({ session, limit: String(limit) });
+    if (task) q.set("task", task);
+    if (before > 0) q.set("before", String(before));
+    return get<{ items: Activity[]; snapshot_cursor: number; earliest_cursor: number; has_more: boolean }>(
+      `/exploration/activity/history?${q.toString()}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      snapshotCursor: r.snapshot_cursor ?? 0,
+      earliestCursor: r.earliest_cursor ?? 0,
+      hasMore: !!r.has_more,
+    }));
+  },
+  // Paged worker (intent) session list — reaches past the legacy fixed 300 cap.
+  // before=0 → newest page; before=<id> → older page. has_more = older intents exist.
+  intentsPage: (task: string, before = 0, limit = 300) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (task) q.set("task", task);
+    q.set("before", String(before > 0 ? before : 0));
+    q.set("page", "1"); // marker so the backend returns the paged {items,has_more} shape
+    return get<{ items: TaskNode[]; has_more: boolean }>(`/exploration/intents?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      hasMore: !!r.has_more,
+    }));
+  },
+
+  // Main-agent conversation segments of a task. Each segment is a resettable session
+  // (clean transcript/context) over the same task; `current` is the writable one.
+  mainSessions: (task: string) =>
+    get<{ sessions: { seq: number; created_at: string }[]; current: number }>(
+      `/exploration/main-sessions${tq(task)}`,
+    ).then((r) => ({ sessions: arr(r.sessions), current: r.current ?? 0 })),
+  // Start a fresh main-agent session segment (does not touch the task's graph/assets/goal).
+  newMainSession: (task: string) =>
+    post<{ seq: number; created_at: string; current: number }>(`/exploration/main-session/new${tq(task)}`),
+
+  // ---- traffic / audit / chat ----
+  audit: (task?: string) => get<Audit>(`/audit${tq(task)}`),
+  traffic: (
+    page = 0,
+    size = 100,
+    host = "",
+    method = "",
+    q = "",
+    opts: {
+      body?: string;
+      path?: string;
+      status?: string;
+      respMin?: string;
+      respMax?: string;
+      sort?: string;
+      order?: string;
+    } = {},
+  ) =>
+    get<TrafficResp>(
+      `/traffic?page=${page}&size=${size}` +
+        (host ? `&host=${encodeURIComponent(host)}` : "") +
+        (method && method !== "all" ? `&method=${encodeURIComponent(method)}` : "") +
+        (q ? `&q=${encodeURIComponent(q)}` : "") +
+        (opts.body ? `&body=${encodeURIComponent(opts.body)}` : "") +
+        (opts.path ? `&path=${encodeURIComponent(opts.path)}` : "") +
+        (opts.status && opts.status !== "all" ? `&status=${encodeURIComponent(opts.status)}` : "") +
+        (opts.respMin ? `&resp_min=${encodeURIComponent(opts.respMin)}` : "") +
+        (opts.respMax ? `&resp_max=${encodeURIComponent(opts.respMax)}` : "") +
+        (opts.sort ? `&sort=${encodeURIComponent(opts.sort)}` : "") +
+        (opts.order ? `&order=${encodeURIComponent(opts.order)}` : ""),
+    ),
+  trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
+  trafficHosts: () => get<{ hosts: TrafficHost[] }>(`/traffic/hosts`),
+  trafficDeleteHost: (host: string) => del<{ deleted: number }>(`/traffic?host=${encodeURIComponent(host)}`),
+  trafficDeleteHosts: (hosts: string[]) => del<{ deleted: number }>(`/traffic/hosts`, { hosts }),
+  // Purges every exchange and compacts the index; `reclaimed` is the bytes of
+  // index handed back to the filesystem.
+  trafficDeleteAll: () => del<{ deleted: number; reclaimed: number }>(`/traffic/all`),
+
+  // ---- app settings (runtime toggles) ----
+  settings: () => get<Settings>(`/settings`),
+  setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  // Run a real "test" search with the given (or saved) config to verify it works.
+  testWebSearch: (patch: {
+    web_search_backend?: string;
+    web_search_proxy?: string;
+    brave_search_api_key?: string;
+    tavily_search_api_key?: string;
+  }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
+
+  chatMentions: (kind: string, query: string, signal?: AbortSignal, cursor = "") =>
+    http<{ items: ChatMention[]; next_cursor?: string }>(
+      `/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`,
+      { signal },
+    ),
+  chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
+    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
+  chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
+  // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
+  chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
+    if (MOCK)
+      return {
+        attachments: files.map((f) => ({
+          name: f.name,
+          path: `uploads/${f.name}`,
+          size: f.size,
+          abs: `/mock/${f.name}`,
+        })),
+      };
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f);
+    const token = getToken();
+    const r = await fetch(`/api/chat/upload?scope=${scope}&id=${encodeURIComponent(id)}`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`上传失败: ${r.status} ${await r.text()}`);
+    return r.json() as Promise<{ attachments: ChatAttachment[] }>;
+  },
+  stopChat: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/chat/stop`, {}),
+  gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
+
+  // ---- LLM ----
+  getLLM: () =>
+    get<{
+      configured: boolean;
+      provider: string;
+      model: string;
+      base_url: string;
+      proxy?: string;
+      key_set: boolean;
+      rate_per_second?: number;
+      rate_per_minute?: number;
+      context_window_k?: number;
+      thinking_type?: string;
+      reasoning_effort?: string;
+    }>("/llm"),
+  setLLM: (
+    provider: string,
+    model: string,
+    base_url: string,
+    api_key: string,
+    rate_per_second = 0,
+    rate_per_minute = 0,
+    proxy = "",
+    context_window_k = 0,
+  ) => post("/llm", { provider, model, base_url, proxy, api_key, rate_per_second, rate_per_minute, context_window_k }),
+  testLLM: (
+    provider: string,
+    model: string,
+    base_url: string,
+    api_key: string,
+    proxy = "",
+    thinking_type = "",
+    reasoning_effort = "",
+    profile_id?: number,
+    streaming = true, // 用该配置真实的收发模式来测，别让"流式能通、非流式不通"漏到会话里
+    session_header_key = "", // 非空=测试请求也带该自定义会话头（值为一次性 session id）
+  ) =>
+    // reply = 模型实际回复(已截断);一个字都不回的配置后端直接判失败
+    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
+      provider,
+      model,
+      base_url,
+      proxy,
+      api_key,
+      thinking_type,
+      reasoning_effort,
+      profile_id,
+      streaming,
+      session_header_key,
+    }),
+  llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
+  saveLLMProfile: (p: {
+    id?: number; // omit/0 = create; set = update that profile
+    name: string;
+    format: string;
+    model: string;
+    base_url?: string;
+    proxy?: string;
+    api_key?: string; // blank on update keeps the existing key
+    rate_per_second?: number;
+    rate_per_minute?: number;
+    context_window_k?: number;
+    thinking_type?: string; // ""(不发送)|"disabled"|"enabled"
+    reasoning_effort?: string; // ""(不发送)|"low"|"medium"|"high"|"xhigh"|"max"
+    priority?: number; // 轮询顺位，越大越先用
+    pool_exclude?: boolean; // true=不作为故障转移目标
+    streaming?: boolean; // true(默认)=流式 | false=非流式
+    max_tokens?: number; // 单次回复输出上限；0=不发送，由服务端默认值决定
+    max_tokens_field?: string; // ""=max_tokens(默认) | "max_completion_tokens"（仅 openai 格式）
+    session_header_key?: string; // 非空=每次请求带该 HTTP 头，头值=当前会话 session id；""=不发送
+    retry?: LLMRetryOverride; // 本配置的重试覆盖；各项留 0 = 跟随全局重试策略
+  }) => post<{ id: number }>("/llm/profiles", p),
+  deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
+  activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
+  // 轮询链的实际顺序 + 各配置的熔断状态。
+  llmPool: () => get<LLMPoolStatus>("/llm/pool"),
+  // 清除熔断，让下一次调用立刻重试该配置；不传 id = 全部清除。
+  resetLLMPool: (id?: string) => post<LLMPoolStatus>("/llm/pool/reset", { id: id ? Number(id) : 0 }),
+  // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。
+  llmRetryPolicy: () => get<LLMRetryPolicy>("/llm/retry-policy"),
+  saveLLMRetryPolicy: (p: LLMRetryPolicy) => post<LLMRetryPolicy>("/llm/retry-policy", p),
+  fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number) =>
+    post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
+      provider,
+      base_url,
+      api_key,
+      proxy,
+      profile_id,
+    }),
+
+  // ---- agents ----
+  agents: () => get<{ agents: Agent[] }>("/agents").then((r) => arr(r.agents)),
+  getAgent: (key: string) => get<AgentDetail>(`/agents/${key}`),
+  createAgent: (key: string, name: string, description = "") => post<Agent>("/agents", { key, name, description }),
+  updateAgent: (key: string, name: string, description = "") =>
+    patch<{ ok: boolean }>(`/agents/${key}`, { name, description }),
+  deleteAgent: (key: string) => del<{ deleted: string }>(`/agents/${key}`),
+
+  // ---- conversations (chat page) ----
+  conversations: () => get<{ conversations: Conversation[] }>("/conversations").then((r) => arr(r.conversations)),
+  createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
+    post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
+  updateConversation: (id: number, input: { title?: string; pinned?: boolean }) =>
+    patch<Conversation>(`/conversations/${id}`, input),
+  renameConversation: (id: number, title: string) => patch<Conversation>(`/conversations/${id}`, { title }),
+  pinConversation: (id: number, pinned: boolean) => patch<Conversation>(`/conversations/${id}`, { pinned }),
+  updateConversationProfile: (id: number, llm_profile_id: number | null) =>
+    patch<{ ok: boolean }>(`/conversations/${id}/profile`, { llm_profile_id }),
+  deleteConversation: (id: number) => del<{ deleted: number }>(`/conversations/${id}`),
+  deleteConversations: (ids: number[]) =>
+    post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
+  // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
+  conversationMessages: (id: number, since = 0) =>
+    get<{ items: Activity[]; cursor: number; running: boolean }>(`/conversations/${id}/messages?since=${since}`).then(
+      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running }),
+    ),
+  // Reverse pagination: the latest `limit` steps (before=0) or the page of older
+  // steps ending before id `before`. hasMore = still-older steps exist.
+  conversationHistory: (id: number, before = 0, limit = 200) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (before > 0) q.set("before", String(before));
+    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean }>(
+      `/conversations/${id}/messages?${q.toString()}`,
+    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore }));
+  },
+  conversationMsgDetail: (id: number, seq: number) =>
+    get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),
+  sendConversationMessage: (id: number, message: string, attachments?: ChatAttachment[]) =>
+    post<{ status: string }>(`/conversations/${id}/messages`, { message, attachments }),
+  stopConversation: (id: number) => post<{ status: string }>(`/conversations/${id}/stop`, {}),
+  saveAgentPrompt: (key: string, template: string, note = "") =>
+    put<{ version: number }>(`/agents/${key}/prompt`, { template, note }),
+  resetAgentPrompt: (key: string) => post<{ version: number }>(`/agents/${key}/prompt/reset`, {}),
+  // 收尾提示词(超时/步数耗尽的 settlement 提示);prompt 空串=清除覆盖、用内置默认;
+  // max_turns 省略则不动、传 0=用内置默认轮数
+  saveAgentWrapup: (key: string, prompt: string, maxTurns?: number) =>
+    put<{ ok: boolean }>(`/agents/${key}/wrapup`, { prompt, max_turns: maxTurns }),
+  resetAgentWrapup: (key: string) =>
+    post<{ ok: boolean; wrapup_default: string; wrapup_max_turns_default: number }>(`/agents/${key}/wrapup/reset`, {}),
+  // 任务级超时收尾词(仅 worker/planner);prompt 空=清除、用内置默认
+  saveAgentTaskTimeoutWrapup: (key: string, prompt: string, maxTurns?: number) =>
+    put<{ ok: boolean }>(`/agents/${key}/wrapup/task-timeout`, { prompt, max_turns: maxTurns }),
+  resetAgentTaskTimeoutWrapup: (key: string) =>
+    post<{ ok: boolean; task_timeout_wrapup_default: string; task_timeout_wrapup_max_turns_default: number }>(
+      `/agents/${key}/wrapup/task-timeout/reset`,
+      {},
+    ),
+  // P3 triggers (仅自定义 agent)
+  agentTriggers: (key: string) =>
+    get<{ triggers: AgentTrigger[] }>(`/agents/${key}/triggers`).then((r) => arr(r.triggers)),
+  createTrigger: (key: string, t: Omit<AgentTrigger, "id" | "agent_key" | "last_fire">) =>
+    post<AgentTrigger>(`/agents/${key}/triggers`, t),
+  updateTrigger: (id: number, t: Omit<AgentTrigger, "id" | "agent_key" | "last_fire">) =>
+    patch<{ ok: boolean }>(`/triggers/${id}`, t),
+  deleteTrigger: (id: number) => del<{ deleted: number }>(`/triggers/${id}`),
+  saveAgentConfig: (
+    key: string,
+    patch: {
+      llm_profile_id?: number | null; // number=绑定；null=解绑(跟随任务/全局)；缺省=不动
+      max_turns?: number;
+      run_seconds?: number;
+      web_search?: boolean;
+      interactive_shell?: boolean;
+      trigger_run_mode?: "serial" | "parallel";
+      trigger_merge_mode?: "by_task" | "all" | "none";
+      trigger_max_parallel?: number;
+    },
+  ) => put<{ ok: boolean }>(`/agents/${key}/config`, patch),
+  agentPromptVersions: (key: string) =>
+    get<{ versions: PromptVersion[] }>(`/agents/${key}/prompts`).then((r) => arr(r.versions)),
+  agentVariables: (key: string) =>
+    get<{ variables: PromptVar[] }>(`/agents/${key}/variables`).then((r) => arr(r.variables)),
+  previewAgentPrompt: (key: string, template: string, sample?: Record<string, string>) =>
+    post<{ rendered: string; error?: string }>(`/agents/${key}/prompt/preview`, { template, sample }),
+  getAgentVisibility: (key: string) => get<{ mcp: number[]; skill: string[] }>(`/agents/${key}/visibility`),
+  setAgentVisibility: (key: string, mcp: number[], skill: string[]) =>
+    put<{ ok: boolean }>(`/agents/${key}/visibility`, { mcp, skill }),
+
+  // ---- tools (内置工具目录) ----
+  tools: () => get<{ tools: Tool[] }>("/tools").then((r) => arr(r.tools)),
+  saveTool: (key: string, patch: Pick<Tool, "description" | "schema" | "agents" | "enabled">) =>
+    put<{ ok: boolean }>(`/tools/${key}`, patch),
+  resetTool: (key: string) => post<{ ok: boolean }>(`/tools/${key}/reset`, {}),
+  // custom tools (自定义工具)
+  createCustomTool: (
+    t: Pick<Tool, "key" | "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
+  ) => post<{ key: string }>("/tools/custom", t),
+  updateCustomTool: (
+    key: string,
+    t: Pick<Tool, "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
+  ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
+  deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
+  testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>
+    post<{ output: string; is_error: boolean }>("/tools/custom/test", body),
+  detectPython: () => post<{ python_interpreter: string }>("/settings/python/detect", {}),
+
+  // ---- mcp ----
+  mcpServers: () => get<{ servers: MCPServer[] }>("/mcp").then((r) => arr(r.servers)),
+  saveMcpServer: (m: Partial<MCPServer>) => post<{ id: number }>("/mcp", m),
+  deleteMcpServer: (id: number) => del<{ deleted: number }>(`/mcp/${id}`),
+  mcpTools: (id: number) => get<{ tools: MCPTool[] }>(`/mcp/${id}/tools`).then((r) => arr(r.tools)),
+  refreshMcpServer: (id: number) => post<{ tools: MCPTool[] }>(`/mcp/${id}/refresh`, {}).then((r) => arr(r.tools)),
+
+  // ---- 资产同步 (ScopeSentry 数据源) ----
+  ssStatus: () =>
+    get<{ exists: boolean; configured: boolean; enabled: boolean; reachable: boolean; url?: string; tools: string[] }>(
+      "/sync/scopesentry/status",
+    ),
+  ssDatasource: (body: { url?: string; api_key?: string }) =>
+    post<{ id: number; enabled: boolean }>("/sync/scopesentry/datasource", body),
+  ssProjects: (page = 1, size = 50, search = "") =>
+    get<{ projects: SSProject[]; tag: Record<string, number> }>(
+      `/sync/scopesentry/projects?page=${page}&size=${size}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
+    ).then((r) => ({ projects: arr(r.projects), tag: r.tag ?? {} })),
+  ssTasks: (page = 1, size = 50, search = "") =>
+    get<{ tasks: SSTask[] }>(
+      `/sync/scopesentry/tasks?page=${page}&size=${size}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
+    ).then((r) => arr(r.tasks)),
+  ssSync: (body: {
+    dimension: "project" | "task";
+    targets: string[];
+    asset_types: string[];
+    create_company?: boolean;
+    page_size?: number;
+  }) =>
+    post<{
+      synced: Record<string, number>;
+      companies: string[] | null;
+      warnings: string[] | null;
+      errors: string[] | null;
+    }>("/sync/scopesentry/sync", body),
+
+  // ---- skills (文件系统) ----
+  skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),
+  createSkill: (s: {
+    name: string;
+    description: string;
+    license?: string;
+    compatibility?: string;
+    mcps?: string[];
+    instructions?: string;
+  }) => post<{ name: string }>("/skills", s),
+  // uploadSkill installs a skill from a .zip (multipart). Surfaces the backend
+  // error text (e.g. 已存在 / 缺少 SKILL.md) so the UI can show a precise message.
+  uploadSkill: async (file: File, overwrite = false): Promise<{ name: string; files: number }> => {
+    if (MOCK) return { name: file.name.replace(/\.zip$/i, ""), files: 1 };
+    const fd = new FormData();
+    fd.append("file", file);
+    const token = getToken();
+    const r = await fetch(`/api/skills/upload${overwrite ? "?overwrite=true" : ""}`, {
+      method: "POST",
+      body: fd,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body?.error || `上传失败(${r.status})`);
+    return body;
+  },
+  deleteSkill: (name: string) => del<{ deleted: string }>(`/skills/${name}`),
+  updateSkillMeta: (
+    name: string,
+    meta: { mcps?: string[]; description?: string; license?: string; compatibility?: string },
+  ) => put<{ ok: boolean }>(`/skills/${name}/meta`, meta),
+  createSkillDir: (skill: string, path: string) => post<{ dir: string }>(`/skills/${skill}/dirs`, { path }),
+  skillFiles: (name: string) => get<{ files: string[] }>(`/skills/${name}/files`).then((r) => r.files),
+  readSkillFile: (name: string, file: string) =>
+    get<{ content: string; file: string }>(`/skills/${name}/files/${file}`).then((r) => r.content),
+  writeSkillFile: (name: string, file: string, content: string) =>
+    put<{ ok: boolean }>(`/skills/${name}/files/${file}`, { content }),
+  deleteSkillPath: (skill: string, path: string) => del<{ deleted: string }>(`/skills/${skill}/files/${path}`),
+  skillUsage: (name: string, limit = 50) =>
+    get<{ calls: SkillCall[] }>(`/skills/${name}/usage?limit=${limit}`).then((r) => arr(r.calls)),
+  missingSkills: (limit = 20) =>
+    get<{ missing: MissingSkill[] }>(`/skills/missing?limit=${limit}`).then((r) => arr(r.missing)),
+
+  // ---- visibility (MCP resource side) ---- (agent ids are strings per spec)
+  resourceVisibility: (kind: string, id: number) =>
+    get<{ agents: string[] }>(`/visibility/${kind}/${id}`).then((r) => arr(r.agents)),
+  toggleVisibility: (agentId: string, kind: string, resourceId: number, visible: boolean) =>
+    post<{ ok: boolean }>("/visibility/toggle", { agent_id: agentId, kind, resource_id: resourceId, visible }),
+
+  // ---- visibility (Skill，按名称) ----
+  skillVisibility: (name: string) => get<{ agents: string[] }>(`/visibility/skill/${name}`).then((r) => arr(r.agents)),
+  toggleSkillVisibility: (agentId: string, skillName: string, visible: boolean) =>
+    post<{ ok: boolean }>("/visibility/skill/toggle", { agent_id: agentId, skill_name: skillName, visible }),
+
+  // ---- intercept rules ----
+  interceptRules: () => get<{ rules: InterceptRule[] }>("/intercept/rules").then((r) => arr(r.rules)),
+  createInterceptRule: (rule: Omit<InterceptRule, "id" | "created_at" | "updated_at">) =>
+    post<InterceptRule>("/intercept/rules", rule),
+  updateInterceptRule: (id: number, rule: Omit<InterceptRule, "id" | "created_at" | "updated_at">) =>
+    put<InterceptRule>(`/intercept/rules/${id}`, rule),
+  deleteInterceptRule: (id: number) => del<{ deleted: number }>(`/intercept/rules/${id}`),
+  toggleInterceptRule: (id: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/intercept/rules/${id}/toggle`, { enabled }),
+
+  // ---- asset intercept rules（资产拦截：全局黑名单） ----
+  assetInterceptRules: () => get<{ rules: AssetInterceptRule[] }>("/asset-intercept/rules").then((r) => arr(r.rules)),
+  createAssetInterceptRule: (rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
+    post<AssetInterceptRule>("/asset-intercept/rules", rule),
+  updateAssetInterceptRule: (id: number, rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
+    put<AssetInterceptRule>(`/asset-intercept/rules/${id}`, rule),
+  deleteAssetInterceptRule: (id: number) => del<{ deleted: number }>(`/asset-intercept/rules/${id}`),
+  toggleAssetInterceptRule: (id: number, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(`/asset-intercept/rules/${id}/toggle`, { enabled }),
+
+  // ---- intercept pending (ask) ----
+  interceptPending: () => get<{ pending: InterceptPending[] }>("/intercept/pending").then((r) => arr(r.pending)),
+  interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
+  interceptDecide: (id: number, decision: "allowed" | "denied") =>
+    post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  interceptExecution: (id: number, conversationId?: number) =>
+    get<import("@/lib/types").InterceptExecution>(
+      `/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`,
+    ),
+  interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
+  interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
+  interceptHistoryPage: (page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>
+    get<{ items: InterceptApprovalRow[]; total?: number }>(
+      `/intercept/history?${interceptPageQuery(page, size, filter)}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? r.items?.length ?? 0,
+    })),
+  interceptTask: (taskId: string) =>
+    get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
+  interceptTaskPage: (taskId: string, page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>
+    get<{ items: InterceptApprovalRow[]; total?: number }>(
+      `/intercept/task/${encodeURIComponent(taskId)}?${interceptPageQuery(page, size, filter)}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? r.items?.length ?? 0,
+    })),
+
+  // ---- intercept tool-config (全局工具拦截范围) ----
+  interceptGetToolConfig: async (): Promise<{ enabled_tools: string[] }> => {
+    if (MOCK) return { enabled_tools: ["bash"] };
+    const token = getToken();
+    const r = await fetch("/api/intercept/tool-config", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  interceptSetToolConfig: async (enabledTools: string[]): Promise<void> => {
+    if (MOCK) return;
+    const token = getToken();
+    const r = await fetch("/api/intercept/tool-config", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ enabled_tools: enabledTools }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  },
+
+  // ---- intercept LLM judge (模型兜底审批,全局配置) ----
+  interceptGetJudgeConfig: () => get<JudgeConfig>("/intercept/judge"),
+  interceptSetJudgeConfig: (cfg: JudgeConfig) => put<{ ok: boolean }>("/intercept/judge", cfg),
+  interceptJudgeUsage: (days = 30) => get<JudgeUsage>(`/intercept/judge/usage?days=${days}`),
+
+  // ---- commands (tool execution history, any tool) ----
+  commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.task) sp.set("task", params.task);
+    if (params?.q) sp.set("q", params.q);
+    sp.set("page", String(params?.page ?? 0));
+    sp.set("size", String(params?.size ?? 50));
+    return get<{ commands: CommandRecord[]; total: number }>(`/commands?${sp}`);
+  },
+  // 各工具调用次数；沿用列表的 task/q 筛选，统计的是整个结果集而非当前页。
+  commandStats: (params?: { task?: string; q?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.task) sp.set("task", params.task);
+    if (params?.q) sp.set("q", params.q);
+    return get<{ stats: ToolStat[] }>(`/commands/stats?${sp}`);
+  },
+
+  // ---- LLM records ----
+  llmRecords: (params?: { model?: string; session?: string; task?: string; page?: number; size?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.model) sp.set("model", params.model);
+    if (params?.session) sp.set("session", params.session);
+    if (params?.task) sp.set("task", params.task);
+    if (params?.page !== undefined) sp.set("page", String(params.page));
+    sp.set("size", String(params?.size ?? 50));
+    return get<{ records: LLMRecordItem[]; total: number }>(`/llm/records?${sp}`);
+  },
+  llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
+  llmTasks: () => get<{ tasks: LLMTask[] }>(`/llm/records/tasks`),
+  llmRecordsDeleteTask: (task: string) => del<{ deleted: number }>(`/llm/records?task=${encodeURIComponent(task)}`),
+  // 按模型聚合本任务的 token 用量（来自常开的 llm_usage 计量账本，逐次调用精确，
+  // per-agent 绑定 / 轮询 / 中断消耗都覆盖）。
+  tokensByModel: (task: string) =>
+    get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
+};

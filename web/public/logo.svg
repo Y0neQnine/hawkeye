@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="eye" x1="200" y1="292" x2="824" y2="732" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A78BFA"/>
+      <stop offset="0.5" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="110" y1="110" x2="914" y2="914" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#ring)" stroke-width="30" stroke-linecap="round">
+    <path d="M765 824.4 A402 402 0 0 1 259 824.4"/>
+    <path d="M199.6 765 A402 402 0 0 1 199.6 259"/>
+    <path d="M259 199.6 A402 402 0 0 1 765 199.6"/>
+    <path d="M824.4 259 A402 402 0 0 1 824.4 765"/>
+  </g>
+  <path d="M512 292 C 690 292 838 396 884 512 C 838 628 690 732 512 732 C 334 732 186 628 140 512 C 186 396 334 292 512 292 Z" fill="url(#eye)"/>
+  <circle cx="512" cy="512" r="146" fill="#0B1020" opacity="0.2"/>
+  <circle cx="512" cy="512" r="132" fill="#22D3EE"/>
+  <g stroke="#0B1020" stroke-width="10" stroke-linecap="round" opacity="0.35">
+    <line x1="512" y1="386" x2="512" y2="492"/>
+    <line x1="512" y1="532" x2="512" y2="638"/>
+    <line x1="386" y1="512" x2="492" y2="512"/>
+    <line x1="532" y1="512" x2="638" y2="512"/>
+  </g>
+  <circle cx="512" cy="512" r="52" fill="#0B1020"/>
+  <circle cx="556" cy="466" r="18" fill="#E0F7FF" opacity="0.9"/>
+</svg>
