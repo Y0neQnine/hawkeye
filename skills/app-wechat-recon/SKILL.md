@@ -1,0 +1,90 @@
+---
+name: app-wechat-recon
+description: 收集目标的移动 App、微信公众号/服务号与小程序时调用，从官网、应用商店与公开搜索页补全名称、平台、包名/AppID、开发者、备案与归属。
+---
+
+# 移动 App 与微信生态收集
+
+在**已授权**前提下，从公开信息收集目标企业的移动应用、微信公众号/服务号、小程序，统一登记为 `app` 资产。只采公开信息，不做逆向、抓包、登录绕过或接口探测。
+
+## 边界
+
+- 只读公开页面：官网下载/联系页、应用商店公开页、公开搜索结果。不下载安装包做逆向，不抓包，不绕过登录/验证码/风控。
+- 不关注公众号、不发送消息、不调用微信接口、不采集个人用户信息。
+- 拿不到微信号/AppID 时留空，不猜测、不用相似字符串补位。
+- 低速率：同一站点或搜索页串行请求，间隔 ≥ 1 秒。
+
+## 1. 移动 App
+
+入口（按优先级）：
+
+1. 官网首页/下载页：`/app`、`/download`、`/client`，以及页脚“App 下载”二维码。
+2. 应用商店公开页：
+   - App Store：`https://apps.apple.com/cn/app/id<数字>`
+   - 安卓：应用宝、华为应用市场、小米、OPPO、vivo 等公开页。
+3. 页面里的商店链接与 deep link：`apps.apple.com`、`play.google.com`、`itms-apps://`、`market://`。
+
+采集字段：应用名称、平台（iOS/Android）、开发者/发行商、iOS Bundle ID、Android 包名、分类、下载入口 URL、应用备案号。
+
+```bash
+curl -skL -m 15 "https://www.example.com/download" -o /tmp/app_page.html
+grep -oiE 'https?://(apps\.apple\.com|play\.google\.com|appgallery\.huawei\.com|app\.mi\.com|sj\.qq\.com)[^"'"'"' <>]+' /tmp/app_page.html | sort -u
+grep -oiE '(itms-apps|market)://[^"'"'"' <>]+' /tmp/app_page.html | sort -u
+```
+
+商店页只取页面可见字段：App Store 页可查 `bundleId`、`sellerName`；安卓商店页查包名与开发者。要求登录/切换地区/验证码时停止，记录“公开页不可达”，不绕过。
+
+## 2. 微信公众号 / 服务号
+
+公开入口：
+
+- 官网页脚的“微信公众号”名称或二维码；
+- 搜狗微信搜索公开列表页：`https://weixin.sogou.com/weixin?type=1&query=<企业名>`；
+- 官网新闻/联系页、招聘页提到的公众号名称。
+
+采集字段：账号名称、微信号（公开可见才记）、类型（订阅号/服务号）、认证主体、简介、入口 URL。
+
+- 搜狗微信常触发验证码：遇到验证码/登录墙立即停止，改用官网与搜索引擎公开结果，不绕过。
+- 只读公开列表，不进入会话、不关注、不发消息。
+
+## 3. 小程序
+
+公开入口：
+
+- 官网或公众号文章中公布的小程序名称、小程序码；
+- 搜索引擎公开结果、微信开放社区公开页；
+- 小程序码落地页中公开的页面路径。
+
+采集字段：名称、主体、公开可见的 AppID（`wx` 开头 18 位，仅当页面公开）、入口 URL 或二维码来源。
+
+不调用微信开放平台接口、不解码加密包、不抓包；AppID 拿不到就留空。
+
+## 4. 写回
+
+先查重：`list_assets(dsl="app_name=关键词", type="app")`。同一应用/账号用稳定标识归并，别重复登记。
+
+用 `insert_assets` 的 `app` 类型登记：
+
+| 字段 | 取值 |
+|---|---|
+| `type` | `app` |
+| `app_name` | 应用/账号/小程序名称 |
+| `category` | `iOS App` / `Android App` / `微信公众号` / `微信服务号` / `微信小程序` |
+| `bundle_id` | iOS Bundle ID / Android 包名 / 公开微信 AppID（无则留空） |
+| `app_icp` | 应用备案号（有则填） |
+| `description` | 开发者或认证主体 + 下载/入口 URL |
+| `company_id` | 归属企业 id（先 `list_companies` 查，或由主 agent `add_company_scope` 建立后取回） |
+
+- 同一 App 的 iOS 与 Android 版本**分别登记**（包名不同、商店入口不同）。
+- 归属证据按 `company-attribution` 分级：商店开发者、认证主体、备案主体属强/中证据；仅名称相似不构成归属。
+- 采集结论（如“官网仅提供安卓包”“公众号搜索被验证码拦截”）写 `record_fact`，注明 observed/inferred。
+
+## 错误处理
+
+| 现象 | 处理 |
+|---|---|
+| 商店页要求登录/地区限制 | 停止，记录“公开页不可达”，不绕过 |
+| 搜狗微信触发验证码 | 停止，改用官网/搜索引擎公开结果 |
+| 只有二维码无文字 | 记录二维码来源 URL，名称留空，不猜测 |
+| AppID 未公开 | 留空；`bundle_id` 为空时靠 `app_name` 唯一约束去重 |
+| 同名应用多个开发者 | 以开发者与备案主体为准，分开登记并在 description 注明 |

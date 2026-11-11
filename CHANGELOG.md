@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增 `app-wechat-recon` 内置 Skill：从官网、应用商店与公开搜索页采集移动 App、微信公众号/服务号、小程序的名称、平台形态、包名/Bundle ID/公开 AppID、开发者、备案与归属，统一登记为 `app` 资产；采集清单同步补充到 worker / planner / pentest 提示词。
+
 ## [0.1.0] - 2026-11-11
 
 ### 变更

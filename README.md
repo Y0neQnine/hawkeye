@@ -14,7 +14,7 @@
 
 Hawkeye 聚焦两件事：**攻击面资产收集**与**持续监控展示**。
 
-- 通过 Agent 任务或外部数据源采集公司/项目名下的域名、子域、IP、端口、站点、服务与端点；
+- 通过 Agent 任务或外部数据源采集公司/项目名下的域名、子域、IP、端口、站点、服务、端点，以及移动 App、公众号/服务号、小程序；
 - 按批次生成资产快照，自动计算与上一批次相比的**新增 / 消失 / 变更**，提供趋势与明细展示；
 - 不提供漏洞扫描、漏洞验证、利用复测或 PoC 能力。
 
@@ -120,7 +120,7 @@ CGO_ENABLED=0 go build -tags embedui -o hawkeye ./cmd/artex
 
 **测绘 API**：FOFA（邮箱 + Key）、Quake、Hunter、Shodan 的凭据在「系统配置 → 测绘 API」中填写，保存在数据库，仅回显是否已配置。内置 `recon_search` 工具由服务端代发查询，密钥不会进入 Agent 提示词或命令；配套 `fofa-mapping` / `quake-mapping` / `hunter-mapping` / `shodan-mapping` 四个 Skill，内置查询语法与资产写回流程。
 
-**内置收集 Skill**：除测绘引擎外，还提供 `subdomain-recon`（证书日志与子域校验）、`web-fingerprint`（HTTP 指纹与页面端点）、`ip-port-mapping`（ASN/端口/TLS 证书）、`company-attribution`（ICP 备案与企业归属）四个基础收集 Skill，均按授权范围与低速率执行，结果通过 `insert_assets` / `record_fact` 写回。
+**内置收集 Skill**：除测绘引擎外，还提供 `subdomain-recon`（证书日志与子域校验）、`web-fingerprint`（HTTP 指纹与页面端点）、`ip-port-mapping`（ASN/端口/TLS 证书）、`company-attribution`（ICP 备案与企业归属）、`app-wechat-recon`（移动 App、公众号/服务号、小程序的公开信息与归属）五个基础收集 Skill，均按授权范围与低速率执行，结果通过 `insert_assets` / `record_fact` 写回。
 
 > 环境变量前缀与可执行文件名仍沿用 `ARTEX_*` / `artex`，属于部署契约，升级时无需调整；数据库连接串变量已更名为 `HAWKEYE_PG_DSN`，旧名 `ARTEX_PG_DSN` 不再读取。
 

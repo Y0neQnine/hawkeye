@@ -332,6 +332,8 @@ var builtinSkillVisibility = map[string][]string{
 	"web-fingerprint":     {"auto", "pentest", "worker", "mainagent"},
 	"ip-port-mapping":     {"auto", "pentest", "worker", "mainagent"},
 	"company-attribution": {"auto", "pentest", "worker", "mainagent", "planner"},
+	// 移动 App / 公众号 / 小程序：官网、应用商店与公开搜索页的公开信息采集。
+	"app-wechat-recon": {"auto", "pentest", "worker", "mainagent", "planner"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default

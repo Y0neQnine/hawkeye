@@ -125,6 +125,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
 			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
+			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
@@ -162,10 +163,10 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						}, "port"),
 					},
 					// app
-					"app_name":    str("应用名称（app 类型必填）"),
-					"bundle_id":   str("Bundle ID（app 类型可选）"),
-					"category":    str("应用分类（可选）"),
-					"description": str("应用描述（可选）"),
+					"app_name":    str("应用/账号/小程序名称（app 类型必填）"),
+					"bundle_id":   str("iOS Bundle ID / Android 包名 / 公开微信 AppID（app 类型可选，有则填，用于去重）"),
+					"category":    str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序（可选，建议填）"),
+					"description": str("描述：开发者/认证主体 + 下载或入口 URL（可选）"),
 					"app_icp":     str("应用 ICP 备案（可选）"),
 					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）"),
 					// service (http)
@@ -533,8 +534,8 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 		"查询资产库：DSL 表达式搜索，或按 id/ids 直取；支持分页。只返回【本任务及直接关联任务】采集范围内的资产。\n"+
 			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。资产类型用独立 type 参数，不写进 DSL。\n"+
 			"未传 id/ids 时 dsl 必须非空（不允许无条件全量查询）。\n"+
-			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
-			"示例：status_code>=400 AND technology=shiro ；(port==80 OR port==443) AND technology=nginx",
+			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、bundle_id、category(如 微信公众号/微信小程序)、app_icp、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
+			"示例：status_code>=400 AND technology=shiro ；(port==80 OR port==443) AND technology=nginx ；查微信生态：type 传 app、dsl 写 category=微信",
 		obj(map[string]any{
 			"dsl":    str(`DSL 查询表达式（语法/字段见工具描述）。未传 id/ids 时必须非空。`),
 			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),

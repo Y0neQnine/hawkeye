@@ -57,6 +57,7 @@ const goalsScopeTail = `
   **严禁**把带子域的主机名缩成根域名——看到 xxx.example.com 就登记整个 example.com 会把范围扩到用户目标之外，违背最小范围原则。
 - 仅当用户给的就是**裸根域名、且不含任何子域**（如直接写 example.com），或明确说“整个站点 / 所有子域 / 全域名” → 才用 kind=root_domain，value=example.com。
 - 纯 IP 或网段 → kind=ip / cidr，value=IP 或 CIDR。
+- 目标是 App / 公众号 / 小程序名称或企业名，且没有可登记的域名/IP → kind=keyword，value=该名称（仅作范围提示，不参与资产自动归属）。
 - **不要**登记公司范围（company）——任务刚建立、资产系统里通常还没有这家公司，登记不上，公司级范围交由后续 plan 阶段处理。
 其它规则：
 - 只登记**目标/描述里明确写出**的范围；严禁臆造或推断未提及的域名/IP。
