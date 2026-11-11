@@ -1,0 +1,32 @@
+name: cleanup-ghcr
+
+# 自动清理 GHCR 旧镜像版本：默认保留最近 3 个版本，每周一清理一次；
+# 也可在 Actions 页面手动触发并指定保留数量。
+on:
+  workflow_dispatch:
+    inputs:
+      min-versions-to-keep:
+        description: "保留最近的镜像版本数（其余删除）"
+        required: true
+        default: "3"
+      delete-only-untagged:
+        description: "仅删除无标签版本（true / false）"
+        required: true
+        default: "false"
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: hawkeye
+          package-type: container
+          token: ${{ secrets.GITHUB_TOKEN }}
+          min-versions-to-keep: ${{ github.event.inputs.min-versions-to-keep || '3' }}
+          delete-only-untagged-versions: ${{ github.event.inputs.delete-only-untagged || 'false' }}
