@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-11
+
+### 变更
+
+- **Hawkeye 首个发布版本**：基于 ARTEX 二次开发，移除攻击与漏洞相关能力（漏洞扫描、验证、利用、PoC 等），只保留资产信息收集与持续监控，形态为 Go 后端 + Next.js 前端的 Web 系统。
+- 品牌更名为 Hawkeye，默认监听端口改为 `8000`（流量录制代理仍为 `8788`）。
+- Docker 镜像发布到 GHCR：`ghcr.io/y0neqnine/hawkeye`；仓库与发布流程见 https://github.com/Y0neQnine/hawkeye 。
+
 ### 配置
 
 #### 变更
