@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: hawkeye-pg
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hawkeye}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
@@ -14,8 +15,9 @@ services:
       retries: 10
     restart: unless-stopped
 
-  artex:
+  hawkeye:
     image: ghcr.io/y0neqnine/hawkeye:${ARTEX_TAG:-latest}
+    container_name: hawkeye
     depends_on:
       postgres:
         condition: service_healthy

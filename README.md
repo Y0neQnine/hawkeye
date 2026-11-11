@@ -122,7 +122,7 @@ CGO_ENABLED=0 go build -tags embedui -o hawkeye ./cmd/artex
 
 **内置收集 Skill**：除测绘引擎外，还提供 `subdomain-recon`（证书日志与子域校验）、`web-fingerprint`（HTTP 指纹与页面端点）、`ip-port-mapping`（ASN/端口/TLS 证书）、`company-attribution`（ICP 备案与企业归属）、`app-wechat-recon`（移动 App、公众号/服务号、小程序的公开信息与归属）五个基础收集 Skill，均按授权范围与低速率执行，结果通过 `insert_assets` / `record_fact` 写回。
 
-> 环境变量前缀与可执行文件名仍沿用 `ARTEX_*` / `artex`，属于部署契约，升级时无需调整；数据库连接串变量已更名为 `HAWKEYE_PG_DSN`，旧名 `ARTEX_PG_DSN` 不再读取。
+> 环境变量前缀 `ARTEX_*` 与 `artex_token` 仍沿用旧命名，属于兼容契约；可执行文件、Docker 服务/容器与脚本输出已统一为 `hawkeye`。数据库连接串变量为 `HAWKEYE_PG_DSN`，旧名 `ARTEX_PG_DSN` 不再读取。
 
 ## 技术架构
 
@@ -146,7 +146,9 @@ git pull --ff-only
                      # 2) 本地：重建前端与内嵌单二进制
 ```
 
-不便拉代码时也可手动升级：Docker 部署执行 `docker compose pull artex && docker compose up -d artex`；二进制部署则停掉服务，用新的可执行文件替换旧的，再通过 `start.sh` / `start.bat` 重新启动。Postgres 数据卷、`./data`（jwt.key 等）与 `./skills` 都会保留。后端每次启动会幂等重跑 `schema.sql`，无需手动迁移；升级前仍建议备份数据库与 `./data`。
+不便拉代码时也可手动升级：Docker 部署执行 `docker compose pull hawkeye && docker compose up -d --remove-orphans hawkeye`；二进制部署则停掉服务，用新的可执行文件替换旧的，再通过 `start.sh` / `start.bat` 重新启动。Postgres 数据卷、`./data`（jwt.key 等）与 `./skills` 都会保留。后端每次启动会幂等重跑 `schema.sql`，无需手动迁移；升级前仍建议备份数据库与 `./data`。
+
+> 从 v0.1.0 升级：Docker 服务名由 `artex` 改为 `hawkeye`。上面的 `--remove-orphans` 会自动清理旧的 `artex` 容器（数据卷与 `./data` 保留），无需手动删除。
 
 ## 开发
 
