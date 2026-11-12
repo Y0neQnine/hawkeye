@@ -42,7 +42,13 @@ update_docker(){
   # 且大版本变动还会有兼容风险）。hawkeye 声明了 depends_on postgres，所以带服务名
   # up 时若 pg 没起会自动拉起，已在跑的则原样保留、不重建。
   info "拉取新镜像（仅 hawkeye）…"
-  docker compose pull hawkeye
+  pulled=0
+  for i in 1 2 3; do
+    if docker compose pull hawkeye; then pulled=1; break; fi
+    warn "镜像拉取失败（第 ${i}/3 次），5 秒后重试…"
+    sleep 5
+  done
+  [ "$pulled" = 1 ] || die "拉取 ghcr.io/y0neqnine/hawkeye 失败：请先给 Docker 守护进程配置可访问 ghcr.io 的代理后重试"
   info "重建并启动（hawkeye 重启时自动迁移 schema）…"
   # --remove-orphans：清掉旧版 artex 服务名留下的容器，避免端口占用。
   docker compose up -d --remove-orphans hawkeye

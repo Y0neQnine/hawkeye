@@ -95,6 +95,36 @@ CGO_ENABLED=0 go build -tags embedui -o hawkeye ./cmd/artex
 
 默认目标为 Linux amd64/arm64、macOS amd64/arm64 与 Windows amd64。可用 `ARTEX_TARGETS`（构建变量名沿用旧命名）自定义目标。
 
+### 拉取镜像报 `unexpected EOF`
+
+`docker compose pull` 报 `unexpected EOF` / `connection reset`，通常是 **Docker 守护进程没有走代理**（浏览器能访问 GitHub 不代表 Docker 能），或镜像层较大时网络中断。镜像包含 Playwright/Chromium、nmap 等工具，体积较大，重跑会复用已下载层。
+
+先确认 Docker 能否直连 GHCR：
+
+```bash
+docker pull ghcr.io/y0neqnine/hawkeye:v0.1.1
+```
+
+- **Docker Desktop**：Settings → Resources → Proxies → Manual，HTTP 与 HTTPS 都填代理地址（如 `http://127.0.0.1:7890`），Apply & Restart。
+- **Linux / Kali（Docker 在虚拟机，代理在宿主机）**：先取宿主机地址，再给 Docker 配置代理：
+
+```bash
+HOST_IP=$(ip route | awk '/default/ {print $3}')
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf >/dev/null <<EOF
+[Service]
+Environment="HTTP_PROXY=http://$HOST_IP:7890"
+Environment="HTTPS_PROXY=http://$HOST_IP:7890"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+宿主机代理需允许 LAN，并放行对应端口。配好后重新执行 `./install.sh` 或 `./update.sh`，脚本会自动重试 3 次。
+
+仍拉取失败时，可改用**方式三：预编译二进制**（[Releases](https://github.com/Y0neQnine/hawkeye/releases/tag/v0.1.1) 下载 `hawkeye-0.1.1-<平台>.zip`），配合已有 PostgreSQL 运行，不依赖 GHCR。
+
 ## 配置
 
 **数据库**（`config.json`，或用环境变量 `HAWKEYE_PG_DSN` 覆盖）：

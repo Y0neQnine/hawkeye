@@ -46,7 +46,15 @@ install_docker(){
     info "沿用已存在的 .env"
   fi
   info "拉取镜像并启动…"
-  docker compose pull || true
+  pulled=0
+  for i in 1 2 3; do
+    if docker compose pull; then pulled=1; break; fi
+    warn "镜像拉取失败（第 ${i}/3 次），5 秒后重试…"
+    sleep 5
+  done
+  if [ "$pulled" != 1 ]; then
+    die "拉取 ghcr.io/y0neqnine/hawkeye 失败：多为 Docker 未走代理或网络中断。请先给 Docker 守护进程配置可访问 ghcr.io 的代理后重试，或改用方式三的预编译二进制"
+  fi
   # --remove-orphans：从旧版 artex 服务名升级时清掉遗留容器，避免端口占用。
   docker compose up -d --remove-orphans
   ok "启动完成 → http://localhost:8000"
