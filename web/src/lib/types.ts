@@ -545,6 +545,29 @@ export interface MonitorChangeQuery {
   offset?: number;
 }
 
+// 自动监控目标：按企业 + 根域名周期性发起增量采集，任务结束后自动快照 diff。
+export interface MonitorTarget {
+  id: number;
+  company_id: number;
+  company_name?: string;
+  root_domain: string;
+  interval_minutes: number;
+  assets_only: boolean;
+  enabled: boolean;
+  last_run_at?: string;
+  last_task_id?: number;
+  last_snapshot_at?: string;
+  created_at: string;
+}
+
+export interface MonitorTargetInput {
+  company_id: number;
+  root_domain: string;
+  interval_minutes: number;
+  assets_only?: boolean;
+  enabled?: boolean;
+}
+
 // ---- Activity / sessions ----
 export type ActivityKind =
   | "tool_use"

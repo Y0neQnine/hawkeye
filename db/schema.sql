@@ -1247,8 +1247,11 @@ CREATE TABLE IF NOT EXISTS monitor_snapshots (
     asset_type  TEXT NOT NULL,
     company_id  BIGINT,
     label       TEXT NOT NULL DEFAULT '',
+    -- attrs 保存参与对比的稳定属性快照，变更记录据此做字段级 diff。
+    attrs       JSONB NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY (run_id, asset_id)
 );
+ALTER TABLE monitor_snapshots ADD COLUMN IF NOT EXISTS attrs JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_asset ON monitor_snapshots(asset_id);
 
 CREATE TABLE IF NOT EXISTS monitor_changes (
@@ -1266,3 +1269,24 @@ CREATE INDEX IF NOT EXISTS idx_monitor_changes_run ON monitor_changes(run_id, id
 CREATE INDEX IF NOT EXISTS idx_monitor_changes_created ON monitor_changes(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_monitor_changes_company ON monitor_changes(company_id, created_at DESC)
     WHERE company_id IS NOT NULL;
+
+-- 自动监控目标：按企业 + 根域名周期性发起增量采集任务，任务完成后自动快照 diff。
+-- 全局开工开关存放在 settings.monitor.auto_enabled（默认关闭），只有开关打开后
+-- 调度器才会为到期目标建任务；每个目标自身还有 enabled 可单独停用。
+CREATE TABLE IF NOT EXISTS monitor_targets (
+    id               BIGSERIAL PRIMARY KEY,
+    company_id       BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    root_domain      TEXT NOT NULL,
+    interval_minutes INTEGER NOT NULL DEFAULT 1440
+                     CHECK (interval_minutes BETWEEN 15 AND 43200),
+    assets_only      BOOLEAN NOT NULL DEFAULT true,
+    enabled          BOOLEAN NOT NULL DEFAULT true,
+    last_run_at      TIMESTAMPTZ,
+    last_task_id     BIGINT,
+    last_snapshot_at TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_monitor_targets_company_domain UNIQUE (company_id, root_domain)
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_targets_due ON monitor_targets(enabled, last_run_at);
+ALTER TABLE monitor_targets ADD COLUMN IF NOT EXISTS last_snapshot_at TIMESTAMPTZ;

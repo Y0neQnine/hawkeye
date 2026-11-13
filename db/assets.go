@@ -754,7 +754,10 @@ ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
     favicon_mmh3   = COALESCE(EXCLUDED.favicon_mmh3,   assets.favicon_mmh3),
     ip             = COALESCE(EXCLUDED.ip,             assets.ip),
     c_segment      = COALESCE(EXCLUDED.c_segment,      assets.c_segment),
-    technologies   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.technologies || EXCLUDED.technologies))),
+    technologies   = CASE
+        WHEN COALESCE(cardinality(EXCLUDED.technologies), 0) = 0 THEN assets.technologies
+        ELSE (SELECT ARRAY(SELECT DISTINCT unnest(assets.technologies || EXCLUDED.technologies)))
+    END,
     auth           = (
         SELECT ARRAY(
             SELECT DISTINCT ON (elem::text) elem

@@ -23,6 +23,7 @@ Hawkeye 聚焦两件事：**攻击面资产收集**与**持续监控展示**。
 - **任务采集**：为每个公司/项目下发采集目标，Agent 使用命令行工具与内置采集工具推进任务，过程可在会话中回放。
 - **资产库**：统一管理公司、资产范围与各类资产，支持 DSL 检索与资产图。
 - **监控中心**：快照批次列表、变更明细（new / gone / changed）、按公司/类型/关键字筛选、近 14 天趋势、手动立即快照。
+- **自动监控（可开关）**：按「企业 + 根域名」配置监控目标与周期，开启总开关后自动发起增量采集，任务结束立即快照对比；可随时关闭总开关或单独停用某个目标。
 - **资产同步**：从 [ScopeSentry](https://github.com/Autumn-27/ScopeSentry) 按项目或任务维度导入资产，导入后可自动触发监控快照。
 - **对话**：与 Agent 多轮对话，直接查询或补采目标资产。
 - **流量与工具执行**：查看录制流量与工具调用记录，便于核对采集结果。
@@ -35,7 +36,9 @@ Hawkeye 聚焦两件事：**攻击面资产收集**与**持续监控展示**。
 - 定时快照默认每 **360 分钟**一次，可用环境变量 `HAWKEYE_MONITOR_INTERVAL_MIN` 调整；设为 `0` 或负数关闭定时快照，页面仍可手动触发；
 - 多实例并发快照由数据库 advisory lock 串行化；
 - 快照批次保留 **90 天**；
-- 资产同步完成后会自动补一次快照（`source=sync`）。
+- 资产同步完成后会自动补一次快照（`source=sync`）；
+- **自动监控**：在监控中心添加「企业 + 根域名」目标并设置周期（6 小时 ~ 30 天），打开总开关后，调度器到期发起一轮增量采集——先用 `list_assets` 读已有资产作基线，再通过证书日志、被动 DNS、测绘 API、子域校验发现新增子域/主机，站点登记时自动识别指纹；只登记新发现或属性缺失的资产。任务结束后立即快照并对比，新增资产按根域名归属自动挂到该企业。总开关默认**关闭**，关闭后不再自动采集，只保留手动快照与同步快照；每个目标也可单独停用；
+- 变更记录保存前后稳定属性，并给出字段级差异（标题、技术栈、状态码、端口、解析记录等），不再只是一句“整行指纹变了”。
 
 ## 安装
 
@@ -150,7 +153,9 @@ sudo systemctl restart docker
 
 **测绘 API**：FOFA（邮箱 + Key）、Quake、Hunter、Shodan 的凭据在「系统配置 → 测绘 API」中填写，保存在数据库，仅回显是否已配置。内置 `recon_search` 工具由服务端代发查询，密钥不会进入 Agent 提示词或命令；配套 `fofa-mapping` / `quake-mapping` / `hunter-mapping` / `shodan-mapping` 四个 Skill，内置查询语法与资产写回流程。
 
-**内置收集 Skill**：除测绘引擎外，还提供 `subdomain-recon`（证书日志与子域校验）、`web-fingerprint`（HTTP 指纹与页面端点）、`ip-port-mapping`（ASN/端口/TLS 证书）、`company-attribution`（ICP 备案与企业归属）、`app-wechat-recon`（移动 App、公众号/服务号、小程序的公开信息与归属）五个基础收集 Skill，均按授权范围与低速率执行，结果通过 `insert_assets` / `record_fact` 写回。
+**内置收集 Skill**：除测绘引擎外，还提供 `subdomain-recon`（证书日志与子域校验）、`web-fingerprint`（HTTP 指纹、系统/产品识别与页面端点）、`ip-port-mapping`（ASN/端口/TLS 证书）、`company-attribution`（ICP 备案与企业归属）、`app-wechat-recon`（移动 App、公众号/服务号、小程序的公开信息与归属）五个基础收集 Skill，均按授权范围与低速率执行，结果通过 `insert_assets` / `record_fact` 写回。
+
+**站点自动指纹**：站点以 `service` 类型登记（Agent `insert_assets`、任务初始地址、资产导入/API）后，服务端会自动做一次只读 GET，回填状态码、响应长度、页面标题、favicon MMH3 与 `technologies`。`technologies` 不只记语言/框架，还会识别具体系统与产品（如 `泛微 e-cology 9.0`、`致远 A8`、`WordPress 6.4.2`、`用友 NC`、`宝塔面板`、`Cloudflare`），并附 `OA` / `CMS` / `WAF` / `ERP` 等类别标签；同一 URL 5 分钟内只探一次，跨主机重定向不跟随。
 
 > 环境变量前缀 `ARTEX_*` 与 `artex_token` 仍沿用旧命名，属于兼容契约；可执行文件、Docker 服务/容器与脚本输出已统一为 `hawkeye`。数据库连接串变量为 `HAWKEYE_PG_DSN`，旧名 `ARTEX_PG_DSN` 不再读取。
 

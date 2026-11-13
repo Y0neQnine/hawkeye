@@ -56,6 +56,8 @@ import type {
   MonitorChangeQuery,
   MonitorOverview,
   MonitorRun,
+  MonitorTarget,
+  MonitorTargetInput,
   MonitorTrendPoint,
   ModelTokenStat,
   PromptVar,
@@ -464,6 +466,22 @@ export const api = {
   monitorSnapshot: () => post<MonitorRun>("/monitor/snapshot"),
   // 删除一个快照批次（快照与变更记录级联删除）。
   deleteMonitorRun: (id: number) => del<{ deleted: number }>(`/monitor/runs/${id}`),
+  // 自动监控全局开关（默认关闭）：关闭时只保留手动快照/外部同步，不自动发起采集。
+  monitorAuto: () => get<{ enabled: boolean }>("/monitor/auto"),
+  setMonitorAuto: (enabled: boolean) => patch<{ enabled: boolean }>("/monitor/auto", { enabled }),
+  // 自动监控目标（企业 + 根域名 + 周期）。
+  monitorTargets: () =>
+    get<{ targets: MonitorTarget[]; enabled: boolean }>("/monitor/targets").then((r) => ({
+      targets: arr(r?.targets),
+      enabled: !!r?.enabled,
+    })),
+  createMonitorTarget: (body: MonitorTargetInput) => post<MonitorTarget>("/monitor/targets", body),
+  updateMonitorTarget: (
+    id: number,
+    patchBody: Partial<Pick<MonitorTargetInput, "interval_minutes" | "assets_only" | "enabled">>,
+  ) => patch<MonitorTarget>(`/monitor/targets/${id}`, patchBody),
+  deleteMonitorTarget: (id: number) => del<{ deleted: number }>(`/monitor/targets/${id}`),
+  runMonitorTarget: (id: number) => post<{ task_id: string }>(`/monitor/targets/${id}/run`),
 
   // ---- assets ----
   // Server-side paginated: pass limit/offset, get back the page + full match total.

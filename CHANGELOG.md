@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **自动监控（可开关）**：监控中心新增「企业 + 根域名」监控目标与周期配置；总开关（`settings.monitor.auto_enabled`，默认关闭）打开后，调度器到期发起增量采集任务——先读已有资产作基线，再通过证书日志/被动 DNS/测绘 API/子域校验发现新增子域与主机，站点登记时自动识别指纹；任务结束立即快照并 diff，新资产按根域名归属自动挂到对应企业。关闭总开关或停用单个目标即可完全停止自动采集。
+- 变更记录新增字段级差异：快照保存稳定属性（标题、技术栈、状态码、端口、解析记录等），监控中心直接显示本次变更的字段，而不是只有整行指纹变化。
+- **站点自动指纹与系统识别**：站点以 `service` 类型登记后（Agent `insert_assets`、任务初始地址、资产导入/API），服务端自动只读探测首页与 favicon，回填 `status_code` / `content_length` / `page_title` / `favicon_mmh3` / `technologies`。内置规则覆盖泛微、致远、用友、金蝶、通达、蓝凌、帆软、WordPress、DedeCMS、Discuz、宝塔、Jenkins、GitLab、Nacos、MinIO、Cloudflare、阿里云/腾讯云 CDN、创宇盾、安全狗、深信服、Fortinet 等常见 OA/ERP/CMS/中间件/WAF/CDN/安全设备，`technologies` 同时给出产品名、版本与 `OA`/`CMS`/`WAF` 等类别标签；favicon 按 Shodan/FOFA 的 MMH3 约定计算。同一 URL 5 分钟内只探一次，跨主机重定向不跟随。
+- `web-fingerprint` Skill 补充系统/产品识别规则与「先回读自动指纹、再补人工采集」的流程；worker / planner / pentest 提示词同步说明。
+
+### 修复
+
+- 资产更新时，若本次未提供 `technologies`，不再把已有技术栈清空（改为保留原值）。
+
 ## [0.1.1] - 2026-11-11
 
 ### 新增

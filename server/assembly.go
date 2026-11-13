@@ -342,12 +342,13 @@ func contains(ss []string, v string) bool {
 // (they only need the AssetStore); the exploration-graph tools refuse with a
 // clear message via ToolSet.needExploration. Binding one of them to a task-less
 // agent in the tools table is therefore a useless tool, not a crash.
-func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
+func buildDomainReg(as *db.AssetStore, enr agent.EnrichTrigger) map[string]actool.CoreTool {
 	if as == nil {
 		return nil
 	}
 	serverTS := agent.NewToolSet(nil, "")
 	serverTS.SetAssetStore(as, as.Companies())
+	serverTS.SetEnrich(enr) // 站点资产插入后自动探测指纹
 	reg := make(map[string]actool.CoreTool)
 	for _, t := range serverTS.AllDomainTools() {
 		reg[t.Name()] = t

@@ -7,19 +7,17 @@
 package enrich
 
 import (
+	"context"
 	"crypto/tls"
-	"html"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/fingerprint"
 
 	"github.com/miekg/dns"
 	"github.com/projectdiscovery/dnsx/libs/dnsx"
@@ -109,8 +107,14 @@ func buildClient(proxy func() string) *http.Client {
 	return &http.Client{
 		Transport: tr,
 		Timeout:   httpTimeout,
-		// cap redirects; keep them within scope by re-checking at probe time
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		// 跟随最多 3 跳同主机重定向（http→https、/→登录页很常见）；跨主机不跟，
+		// 避免把采集带出授权范围。
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 || req.URL.Host != via[0].URL.Host {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
 	}
 }
 
@@ -219,41 +223,29 @@ func (e *Engine) doDNS(id int64, host string) {
 
 // ---- HTTP probe ----
 
-var reTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-
+// doHTTP performs one read-only GET (plus favicon) and writes back status/title/
+// technologies/favicon hash. This is what makes "采集到站点即识别指纹" automatic:
+// every inserted service URL is enriched without the agent having to re-probe it.
 func (e *Engine) doHTTP(id int64, rawURL string) {
-	host := hostOf(rawURL)
-	if host == "" {
+	if hostOf(rawURL) == "" {
 		return
 	}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*httpTimeout)
+	defer cancel()
+	obs, err := fingerprint.Probe(ctx, e.client, rawURL)
 	if err != nil {
 		return
 	}
-	req.Header.Set("User-Agent", "artex-enrich/1.0")
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // cap 1 MiB
-	statusCode := resp.StatusCode
-	bodyLen := int64(len(body))
-	title := extractTitle(body)
+	statusCode := obs.StatusCode
+	bodyLen := obs.ContentLength
 	_, _ = e.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
 		URL:           rawURL,
+		Technologies:  obs.Technologies,
 		StatusCode:    &statusCode,
 		ContentLength: &bodyLen,
-		PageTitle:     title,
+		PageTitle:     obs.PageTitle,
+		FaviconMMH3:   obs.FaviconMMH3,
 	})
-}
-
-func extractTitle(body []byte) string {
-	m := reTitle.FindSubmatch(body)
-	if m == nil {
-		return ""
-	}
-	return strings.TrimSpace(html.UnescapeString(string(m[1])))
 }
 
 func hostOf(rawURL string) string {

@@ -502,7 +502,20 @@ type assetInsertError struct {
 	Error string `json:"error"`
 }
 
-func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput) ([]assetInsertResult, []assetInsertError) {
+// probeSite enqueues the async fingerprint probe for a collected HTTP service.
+func (s *Server) probeSite(id int64, rawURL string) {
+	if s.m == nil {
+		return
+	}
+	if eng := s.m.Enrich(); eng != nil {
+		eng.ProbeSite(id, rawURL)
+	}
+}
+
+// insertAssetInputs upserts imported/API-submitted assets. probe, when non-nil,
+// is called for each HTTP service with its new id + URL so the enrichment engine
+// can fingerprint the site (status/title/technologies/favicon).
+func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, probe func(int64, string)) ([]assetInsertResult, []assetInsertError) {
 	var results []assetInsertResult
 	var errs []assetInsertError
 	for i, a := range items {
@@ -541,6 +554,9 @@ func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput) ([]a
 			errs = append(errs, assetInsertError{Index: i, Error: err.Error()})
 			continue
 		}
+		if a.Type == "service" && a.URL != "" && probe != nil {
+			probe(id, a.URL)
+		}
 		if taskID > 0 {
 			_ = as.SetTaskAssetSource(taskID, id, "api", "通过资产 API 登记", nil)
 		}
@@ -563,7 +579,7 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	results, errs := insertAssetInputs(as, req.TaskID, req.Assets)
+	results, errs := insertAssetInputs(as, req.TaskID, req.Assets, s.probeSite)
 	writeJSON(w, 200, map[string]any{"results": results, "errors": errs})
 }
 
@@ -957,7 +973,7 @@ func (s *Server) importAssets(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "没有可导入的资产")
 		return
 	}
-	results, insertErrs := insertAssetInputs(as, 0, items)
+	results, insertErrs := insertAssetInputs(as, 0, items, s.probeSite)
 	errs = append(errs, insertErrs...)
 	attached := int64(0)
 	if companyID > 0 && len(results) > 0 {

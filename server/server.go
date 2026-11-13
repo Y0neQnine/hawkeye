@@ -216,7 +216,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			return a.TaskTimeoutWrapupMaxTurns, true
 		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
-		domainReg := buildDomainReg(m.Assets())
+		domainReg := buildDomainReg(m.Assets(), m.Enrich())
 		wireTools(m.pg, domainReg)      // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)               // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		s.seedOrchestrationTools()      // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
@@ -747,6 +747,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/monitor/changes", s.monitorChanges)
 	mux.HandleFunc("GET /api/monitor/trend", s.monitorTrend)
 	mux.HandleFunc("POST /api/monitor/snapshot", s.monitorSnapshot)
+	mux.HandleFunc("GET /api/monitor/auto", s.monitorAutoGet)
+	mux.HandleFunc("PATCH /api/monitor/auto", s.monitorAutoSet)
+	mux.HandleFunc("GET /api/monitor/targets", s.monitorTargets)
+	mux.HandleFunc("POST /api/monitor/targets", s.monitorCreateTarget)
+	mux.HandleFunc("PATCH /api/monitor/targets/{id}", s.monitorUpdateTarget)
+	mux.HandleFunc("DELETE /api/monitor/targets/{id}", s.monitorDeleteTarget)
+	mux.HandleFunc("POST /api/monitor/targets/{id}/run", s.monitorRunTarget)
 
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
@@ -1659,6 +1666,10 @@ func (s *Server) seed(t *Task, text string) {
 		}
 		if rootID > 0 {
 			_ = as.SetTaskAssetSource(taskID, rootID, "task", "由任务描述或目标初始化", nil)
+			// 初始站点同样自动探测指纹/系统（与 Agent 采集落库一致）。
+			if eng := s.m.Enrich(); eng != nil {
+				eng.ProbeSite(rootID, u)
+			}
 		}
 	}
 	// anchor the seeded assets to this task's begin root as lineage/provenance

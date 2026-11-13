@@ -9,6 +9,8 @@ import {
   CameraIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  PlayIcon,
+  PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -27,11 +29,27 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { Company, MonitorChange, MonitorOverview, MonitorRun, MonitorTrendPoint } from "@/lib/types";
+import type {
+  Company,
+  MonitorChange,
+  MonitorOverview,
+  MonitorRun,
+  MonitorTarget,
+  MonitorTrendPoint,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const CHANGE_META = {
@@ -51,6 +69,51 @@ const ASSET_TYPES = [
 ];
 
 const PAGE_SIZE = 20;
+
+const INTERVAL_OPTIONS = [
+  { value: 360, label: "每 6 小时" },
+  { value: 720, label: "每 12 小时" },
+  { value: 1440, label: "每天" },
+  { value: 4320, label: "每 3 天" },
+  { value: 10080, label: "每周" },
+  { value: 43200, label: "每 30 天" },
+];
+
+const FIELD_LABELS: Record<string, string> = {
+  domain: "域名",
+  root_domain: "根域名",
+  ip: "IP",
+  port: "端口",
+  url: "URL",
+  service_name: "服务名",
+  service_type: "服务类型",
+  status_code: "状态码",
+  content_length: "响应长度",
+  page_title: "页面标题",
+  technologies: "技术栈",
+  favicon_mmh3: "图标指纹",
+  open_ports: "开放端口",
+  record_type: "解析类型",
+  record_value: "解析记录",
+  bundle_id: "包名",
+  app_name: "应用名称",
+  category: "分类",
+  icp: "备案",
+  company_id: "归属企业",
+};
+
+function intervalLabel(minutes: number) {
+  return INTERVAL_OPTIONS.find((item) => item.value === minutes)?.label ?? `每 ${Math.round(minutes / 60)} 小时`;
+}
+
+function changedFields(change: MonitorChange): string[] {
+  const list = (change.detail as { changes?: Array<{ field?: string }> } | undefined)?.changes;
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => item.field)
+    .filter((field): field is string => !!field)
+    .map((field) => FIELD_LABELS[field] ?? field);
+}
 
 function formatTime(value?: string) {
   if (!value) return "—";
@@ -84,19 +147,36 @@ export default function MonitorPage() {
   const [deleteTarget, setDeleteTarget] = React.useState<MonitorRun | null>(null);
   const [deleting, setDeleting] = React.useState(false);
 
+  const [autoEnabled, setAutoEnabled] = React.useState(false);
+  const [autoSaving, setAutoSaving] = React.useState(false);
+  const [targets, setTargets] = React.useState<MonitorTarget[]>([]);
+  const [targetBusy, setTargetBusy] = React.useState(0);
+  const [createOpen, setCreateOpen] = React.useState(false);
+  const [creating, setCreating] = React.useState(false);
+  const [newCompanyID, setNewCompanyID] = React.useState(0);
+  const [newDomain, setNewDomain] = React.useState("");
+  const [newInterval, setNewInterval] = React.useState(1440);
+  const [newAssetsOnly, setNewAssetsOnly] = React.useState(true);
+  const [removeTarget, setRemoveTarget] = React.useState<MonitorTarget | null>(null);
+  const [removingTarget, setRemovingTarget] = React.useState(false);
+
   const loadBase = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [ov, runPage, points, companyList] = await Promise.all([
+      const [ov, runPage, points, companyList, targetState] = await Promise.all([
         api.monitorOverview(),
         api.monitorRuns(30, 0),
         api.monitorTrend(14),
         api.companies(),
+        api.monitorTargets(),
       ]);
       setOverview(ov);
       setRuns(runPage.runs);
       setTrend(points);
       setCompanies(companyList);
+      setTargets(targetState.targets);
+      setAutoEnabled(targetState.enabled);
+      setNewCompanyID((current) => current || companyList[0]?.id || 0);
     } catch {
       toast.error("监控概览加载失败");
     } finally {
@@ -175,6 +255,89 @@ export default function MonitorPage() {
     }
   };
 
+  const toggleAuto = async (next: boolean) => {
+    setAutoSaving(true);
+    try {
+      const res = await api.setMonitorAuto(next);
+      setAutoEnabled(res.enabled);
+      toast.success(res.enabled ? "已开启自动监控，将按目标周期发起增量采集" : "已关闭自动监控，不再自动发起采集");
+    } catch (e) {
+      toast.error("切换自动监控失败：" + String((e as Error)?.message ?? e));
+    } finally {
+      setAutoSaving(false);
+    }
+  };
+
+  const patchTarget = async (target: MonitorTarget, body: { interval_minutes?: number; enabled?: boolean }) => {
+    setTargetBusy(target.id);
+    try {
+      const updated = await api.updateMonitorTarget(target.id, body);
+      setTargets((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (e) {
+      toast.error("更新监控目标失败：" + String((e as Error)?.message ?? e));
+    } finally {
+      setTargetBusy(0);
+    }
+  };
+
+  const runTargetNow = async (target: MonitorTarget) => {
+    setTargetBusy(target.id);
+    try {
+      const res = await api.runMonitorTarget(target.id);
+      toast.success(`已启动增量采集任务 #${res.task_id}`);
+      await loadBase();
+    } catch (e) {
+      toast.error("启动监控失败：" + String((e as Error)?.message ?? e));
+    } finally {
+      setTargetBusy(0);
+    }
+  };
+
+  const submitCreateTarget = async () => {
+    if (!newCompanyID) {
+      toast.error("请选择企业");
+      return;
+    }
+    if (!newDomain.trim()) {
+      toast.error("请填写根域名");
+      return;
+    }
+    setCreating(true);
+    try {
+      const target = await api.createMonitorTarget({
+        company_id: newCompanyID,
+        root_domain: newDomain.trim(),
+        interval_minutes: newInterval,
+        assets_only: newAssetsOnly,
+        enabled: true,
+      });
+      toast.success(`已添加监控目标 ${target.root_domain}`);
+      setCreateOpen(false);
+      setNewDomain("");
+      await loadBase();
+    } catch (e) {
+      toast.error("添加监控目标失败：" + String((e as Error)?.message ?? e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const confirmRemoveTarget = async () => {
+    if (!removeTarget) return;
+    setRemovingTarget(true);
+    try {
+      const res = await api.deleteMonitorTarget(removeTarget.id);
+      if (res.deleted === 0) toast.warning("监控目标已不存在");
+      else toast.success(`已删除监控目标 ${removeTarget.root_domain}`);
+      await loadBase();
+    } catch (e) {
+      toast.error("删除监控目标失败：" + String((e as Error)?.message ?? e));
+    } finally {
+      setRemovingTarget(false);
+      setRemoveTarget(null);
+    }
+  };
+
   const totalPages = Math.max(1, Math.ceil(totalChanges / PAGE_SIZE));
   const latest = overview?.latest_run;
   const maxTrend = Math.max(1, ...trend.map((p) => p.new + p.gone + p.changed));
@@ -236,6 +399,128 @@ export default function MonitorPage() {
           </div>
         </Card>
       </div>
+
+      <Card className="p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              自动监控
+              <Switch
+                checked={autoEnabled}
+                onCheckedChange={(value) => void toggleAuto(value)}
+                disabled={autoSaving}
+                aria-label="自动监控开关"
+              />
+              {autoEnabled ? (
+                <Badge className="bg-emerald-100 text-emerald-700">已开启</Badge>
+              ) : (
+                <Badge variant="outline">已关闭</Badge>
+              )}
+            </div>
+            <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+              开启后按目标周期自动发起增量采集：先读已有资产作为基线，只补新发现的子域/服务；任务结束立即快照并对比。
+              关闭后不自动采集，只保留手动快照与外部同步。
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              if (!newCompanyID) setNewCompanyID(companies[0]?.id ?? 0);
+              setCreateOpen(true);
+            }}
+            disabled={companies.length === 0}
+          >
+            <PlusIcon className="size-4" /> 新增监控目标
+          </Button>
+        </div>
+        <div className="mt-3 overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>企业</TableHead>
+                <TableHead>根域名</TableHead>
+                <TableHead className="w-36">周期</TableHead>
+                <TableHead className="w-24">范围</TableHead>
+                <TableHead className="w-44">上次运行</TableHead>
+                <TableHead className="w-20">启用</TableHead>
+                <TableHead className="w-24 text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {targets.map((target) => (
+                <TableRow key={target.id}>
+                  <TableCell className="text-sm">{target.company_name || `#${target.company_id}`}</TableCell>
+                  <TableCell className="font-mono text-xs">{target.root_domain}</TableCell>
+                  <TableCell>
+                    <Select
+                      value={String(target.interval_minutes)}
+                      onValueChange={(value) => void patchTarget(target, { interval_minutes: Number(value) })}
+                      disabled={targetBusy === target.id}
+                    >
+                      <SelectTrigger className="h-8 w-[130px]" size="sm">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {INTERVAL_OPTIONS.map((item) => (
+                          <SelectItem key={item.value} value={String(item.value)}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">{target.assets_only ? "仅资产" : "完整"}</Badge>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {formatTime(target.last_run_at)}
+                    {target.last_task_id ? ` · 任务 #${target.last_task_id}` : ""}
+                  </TableCell>
+                  <TableCell>
+                    <Switch
+                      checked={target.enabled}
+                      onCheckedChange={(value) => void patchTarget(target, { enabled: value })}
+                      disabled={targetBusy === target.id}
+                      aria-label={`启用 ${target.root_domain}`}
+                    />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        onClick={() => void runTargetNow(target)}
+                        disabled={targetBusy === target.id}
+                        aria-label={`立即运行 ${target.root_domain}`}
+                      >
+                        <PlayIcon className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => setRemoveTarget(target)}
+                        aria-label={`删除监控目标 ${target.root_domain}`}
+                      >
+                        <Trash2Icon className="size-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {targets.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={7} className="h-20 text-center text-sm text-muted-foreground">
+                    还没有监控目标。新增后，开启自动监控即可按周期发现该企业根域名下新出现的系统。
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
 
       <Card className="p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -433,6 +718,7 @@ export default function MonitorPage() {
                 {changes.map((change) => {
                   const meta = CHANGE_META[change.change_type];
                   const Icon = meta.icon;
+                  const fields = changedFields(change);
                   return (
                     <TableRow key={change.id}>
                       <TableCell>
@@ -445,6 +731,12 @@ export default function MonitorPage() {
                         <div className="flex flex-col">
                           <span className="font-mono text-xs">{change.label}</span>
                           <span className="text-[11px] text-muted-foreground">{change.asset_type}</span>
+                          {fields.length > 0 && (
+                            <span className="text-[11px] text-amber-700">
+                              字段：{fields.slice(0, 3).join("、")}
+                              {fields.length > 3 ? ` 等 ${fields.length} 项` : ""}
+                            </span>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="text-sm">{change.company ?? "—"}</TableCell>
@@ -520,6 +812,101 @@ export default function MonitorPage() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {deleting ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>新增监控目标</DialogTitle>
+            <DialogDescription>
+              按企业 + 根域名周期性发起增量采集，任务结束自动快照并对比变更；新资产按根域名归属到该企业。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <span className="text-sm">企业</span>
+              <Select value={String(newCompanyID)} onValueChange={(value) => setNewCompanyID(Number(value))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择企业" />
+                </SelectTrigger>
+                <SelectContent>
+                  {companies.map((company) => (
+                    <SelectItem key={company.id} value={String(company.id)}>
+                      {company.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-sm">根域名</span>
+              <Input
+                value={newDomain}
+                onChange={(event) => setNewDomain(event.target.value)}
+                placeholder="example.com（可粘贴 URL，自动取根域名）"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-sm">监控周期</span>
+              <Select value={String(newInterval)} onValueChange={(value) => setNewInterval(Number(value))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {INTERVAL_OPTIONS.map((item) => (
+                    <SelectItem key={item.value} value={String(item.value)}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div>
+                <div className="text-sm">仅采集资产</div>
+                <div className="text-xs text-muted-foreground">只补资产与稳定属性，不做更深的页面/端点采集</div>
+              </div>
+              <Switch checked={newAssetsOnly} onCheckedChange={setNewAssetsOnly} aria-label="仅采集资产" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
+              取消
+            </Button>
+            <Button onClick={() => void submitCreateTarget()} disabled={creating}>
+              {creating ? "添加中…" : "添加"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={!!removeTarget}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除监控目标{removeTarget ? ` · ${removeTarget.root_domain}` : ""}</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除后不会再按周期自动采集该根域名，已采集的资产与历史快照不受影响。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removingTarget}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmRemoveTarget();
+              }}
+              disabled={removingTarget}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {removingTarget ? "删除中…" : "确认删除"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

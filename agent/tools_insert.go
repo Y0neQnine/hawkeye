@@ -125,6 +125,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
 			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
+			"service(HTTP) 只要给 url 即可：系统会自动只读探测首页并识别系统/技术栈（status_code/content_length/page_title/technologies/favicon_mmh3），随后可用 list_assets 回读，无需重复手工抓取。\n"+
 			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
@@ -337,6 +338,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				if err != nil {
 					errs = append(errs, errEntry{Index: i, Error: err.Error()})
 					continue
+				}
+				// 站点一落库就异步探测：抓首页/响应头/favicon 并识别系统指纹，
+				// 无需 worker 再手工 curl 一遍。同 URL 5 分钟内只探一次。
+				if typ == "service" && item.URL != "" && t.enrich != nil {
+					t.enrich.ProbeSite(id, item.URL)
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++

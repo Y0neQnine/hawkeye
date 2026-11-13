@@ -24,6 +24,8 @@ type Scheduler struct {
 	s    *Server
 	pg   *db.DB
 	tick time.Duration
+
+	lastMonitorCheck time.Time
 }
 
 const (
@@ -104,6 +106,7 @@ func (sc *Scheduler) init() {
 }
 
 func (sc *Scheduler) step() {
+	sc.fireMonitorTargets()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return
@@ -116,6 +119,61 @@ func (sc *Scheduler) step() {
 	sc.fireTaskTimeouts(triggers)
 	sc.fireToolCalls(triggers)
 	sc.fireTaskCreates(triggers)
+}
+
+// monitorTaskMaxPerTick caps tasks created by one scheduler tick so a long
+// downtime cannot flood the queue with every overdue target at once.
+const monitorTaskMaxPerTick = 3
+
+// monitorCheckInterval throttles monitor-state polling: the scheduler ticks every
+// 5s but target intervals are minutes at minimum, so per-tick queries are wasted.
+const monitorCheckInterval = 30 * time.Second
+
+// fireMonitorTargets drives automatic surface monitoring:
+//  1. targets whose previous run finished get a snapshot now (diff lands in the
+//     monitoring center right after the collection, not hours later);
+//  2. if the global switch is on, overdue targets get one incremental collection
+//     task each, scoped to the target company so new assets are attributed there.
+func (sc *Scheduler) fireMonitorTargets() {
+	if sc.s.m == nil || sc.s.m.pg == nil {
+		return
+	}
+	if time.Since(sc.lastMonitorCheck) < monitorCheckInterval {
+		return
+	}
+	sc.lastMonitorCheck = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ms := sc.s.m.pg.Monitor()
+
+	if awaiting, err := ms.TargetsAwaitingSnapshot(ctx); err == nil {
+		for _, tgt := range awaiting {
+			if tgt.LastTaskID == nil || !sc.s.monitorTaskDone(*tgt.LastTaskID) {
+				continue
+			}
+			// Claim first; a failed snapshot is retried by the periodic ticker.
+			if err := ms.MarkTargetSnapshotted(ctx, tgt.ID); err != nil {
+				continue
+			}
+			go sc.s.snapshotMonitor(context.Background(), "schedule", "monitor:"+tgt.RootDomain)
+		}
+	}
+
+	if !sc.s.m.pg.GetBool(db.MonitorAutoSettingKey, false) {
+		return
+	}
+	targets, err := ms.DueTargets(ctx, monitorTaskMaxPerTick)
+	if err != nil || len(targets) == 0 {
+		return
+	}
+	for _, tgt := range targets {
+		task, err := sc.s.launchMonitorRun(&tgt)
+		if err != nil {
+			log.Printf("[monitor] 目标 #%d (%s) 建任务失败: %v", tgt.ID, tgt.RootDomain, err)
+			continue
+		}
+		log.Printf("[monitor] 目标 #%d 启动增量采集 task#%s (%s)", tgt.ID, task.ID, tgt.RootDomain)
+	}
 }
 
 // fireIntervals fires triggers whose interval has elapsed since last_fire.

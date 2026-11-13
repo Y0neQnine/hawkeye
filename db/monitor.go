@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -19,6 +21,9 @@ import (
 // =====================================================================
 
 const monitorSnapshotLockKey int64 = 7337741002
+
+// ErrMonitorSnapshotBusy means another snapshot batch is currently running.
+var ErrMonitorSnapshotBusy = errors.New("另一批快照正在执行，请稍后重试")
 
 // MonitorRun 是一次采集快照批次。
 type MonitorRun struct {
@@ -103,6 +108,30 @@ const monitorFingerprintSQL = `md5(concat_ws('|',
 
 const monitorLabelSQL = `coalesce(nullif(url,''), nullif(domain,''), nullif(app_name,''), nullif(ip,''), nullif(service_name,''), id::text)`
 
+// monitorAttrsSQL 抽出参与变更对比的稳定属性；变更记录里用它算字段级 diff，
+// 避免只看到"整行指纹变了"却不知道变的是什么。
+const monitorAttrsSQL = `jsonb_build_object(
+		'domain', coalesce(domain,''),
+		'root_domain', coalesce(root_domain,''),
+		'ip', coalesce(ip,''),
+		'port', coalesce(port,0),
+		'url', coalesce(url,''),
+		'service_name', coalesce(service_name,''),
+		'service_type', coalesce(service_type,''),
+		'status_code', coalesce(status_code,0),
+		'content_length', coalesce(content_length,0),
+		'page_title', coalesce(page_title,''),
+		'technologies', coalesce(to_jsonb(technologies),'[]'::jsonb),
+		'favicon_mmh3', coalesce(favicon_mmh3,''),
+		'open_ports', coalesce(to_jsonb(open_ports),'[]'::jsonb),
+		'record_type', coalesce(record_type,''),
+		'record_value', coalesce(to_jsonb(record_value),'[]'::jsonb),
+		'bundle_id', coalesce(bundle_id,''),
+		'app_name', coalesce(app_name,''),
+		'category', coalesce(category,''),
+		'icp', coalesce(icp,''),
+		'company_id', coalesce(company_id,0))`
+
 // CreateSnapshot records the current asset inventory and diffs it against the
 // previous successful run. The first run is a baseline: it stores the snapshot
 // but reports no changes, so a fresh install is not flooded with "new" rows.
@@ -117,9 +146,14 @@ func (s *MonitorStore) CreateSnapshot(ctx context.Context, trigger, source strin
 	defer func() { _ = tx.Rollback() }()
 
 	// Serialize snapshots so two concurrent runs cannot both diff against the
-	// same predecessor and produce duplicated change rows.
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, monitorSnapshotLockKey); err != nil {
+	// same predecessor and produce duplicated change rows. Peek first without
+	// blocking so a routine tick never piles up behind a long-running snapshot.
+	var locked bool
+	if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock($1)`, monitorSnapshotLockKey).Scan(&locked); err != nil {
 		return nil, err
+	}
+	if !locked {
+		return nil, ErrMonitorSnapshotBusy
 	}
 
 	var prev sql.NullInt64
@@ -138,8 +172,8 @@ func (s *MonitorStore) CreateSnapshot(ctx context.Context, trigger, source strin
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_snapshots
-		(run_id, asset_id, fingerprint, asset_type, company_id, label)
-		SELECT $1, a.id, `+monitorFingerprintSQL+`, a.type, a.company_id, `+monitorLabelSQL+`
+		(run_id, asset_id, fingerprint, asset_type, company_id, label, attrs)
+		SELECT $1, a.id, `+monitorFingerprintSQL+`, a.type, a.company_id, `+monitorLabelSQL+`, `+monitorAttrsSQL+`
 		FROM assets a`, runID); err != nil {
 		return nil, err
 	}
@@ -165,7 +199,8 @@ func (s *MonitorStore) CreateSnapshot(ctx context.Context, trigger, source strin
 		if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_changes
 			(run_id, asset_id, change_type, asset_type, company_id, label, detail)
 			SELECT $1, c.asset_id, 'changed', c.asset_type, c.company_id, c.label,
-			       jsonb_build_object('before', p.fingerprint, 'after', c.fingerprint)
+			       jsonb_build_object('before', p.attrs, 'after', c.attrs,
+			                          'before_fingerprint', p.fingerprint, 'after_fingerprint', c.fingerprint)
 			FROM monitor_snapshots c
 			JOIN monitor_snapshots p ON p.run_id = $2 AND p.asset_id = c.asset_id
 			WHERE c.run_id = $1 AND p.fingerprint IS DISTINCT FROM c.fingerprint`, runID, prevID); err != nil {
@@ -342,10 +377,44 @@ func (s *MonitorStore) ListChanges(ctx context.Context, f MonitorChangeFilter) (
 			if err := json.Unmarshal(detail, &c.Detail); err != nil {
 				return nil, 0, err
 			}
+			enrichMonitorDetail(c.Detail)
 		}
 		out = append(out, c)
 	}
 	return out, total, rows.Err()
+}
+
+// enrichMonitorDetail turns the stored before/after attribute snapshots into a
+// compact field-level diff so the UI can explain what actually changed.
+func enrichMonitorDetail(detail map[string]any) {
+	if detail == nil {
+		return
+	}
+	before, ok1 := detail["before"].(map[string]any)
+	after, ok2 := detail["after"].(map[string]any)
+	if !ok1 || !ok2 {
+		return
+	}
+	seen := make(map[string]struct{}, len(before)+len(after))
+	for k := range before {
+		seen[k] = struct{}{}
+	}
+	for k := range after {
+		seen[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	changes := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		if reflect.DeepEqual(before[k], after[k]) {
+			continue
+		}
+		changes = append(changes, map[string]any{"field": k, "before": before[k], "after": after[k]})
+	}
+	detail["changes"] = changes
 }
 
 func (s *MonitorStore) Overview(ctx context.Context) (*MonitorOverview, error) {
