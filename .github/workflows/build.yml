@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build:static
+        working-directory: web
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go test
+        run: go test ./fingerprint/ ./enrich/
+
+      # 与 release 一致：把静态导出的前端内嵌进二进制再交叉编译，
+      # 这样 main 上的提交也能验证内嵌前端 + embedui 标签可用。
+      - name: Embed frontend
+        run: |
+          rm -rf server/webui/dist
+          mkdir -p server/webui/dist
+          cp -r web/out/. server/webui/dist/
+
+      - name: Cross-compile embedded binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=linux GOARCH=amd64 go build -tags embedui -trimpath -o /tmp/hawkeye-linux-amd64 ./cmd/artex
+          GOOS=windows GOARCH=amd64 go build -tags embedui -trimpath -o /tmp/hawkeye-windows-amd64.exe ./cmd/artex
+          ls -lh /tmp/hawkeye-linux-amd64 /tmp/hawkeye-windows-amd64.exe
