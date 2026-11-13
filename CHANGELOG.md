@@ -2,66 +2,44 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [0.3.1] - 2026-11-13
+## [0.0.1] - 2026-11-13
+
+Hawkeye 的第一个版本：基于 ARTEX 二次开发，移除漏洞扫描、验证与利用等攻击能力，只保留授权范围内的资产信息收集与持续监控；形态为 Go 后端 + Next.js 前端的 Web 系统，默认监听 `8000`（流量录制代理 `8788`）。
 
 ### 新增
 
-- **IP 资产 CDN/WAF 标签**：IP 资产的 `technologies` 用于记录网络角色与厂商（如 `["CDN","WAF","saaswaf"]`），资产页与任务资产页的 IP 列表新增「标签」列；`insert_assets`、资产 API 与 CSV 导入均可写入，重复登记按并集合并、不清空已有标签。DNS 富化解析到厂商加速/防护域（saaswaf、cloudflare、阿里云/腾讯云 CDN、网宿、Akamai、CloudFront 等 CNAME 指纹）时自动给解析 IP 打标。标签只描述共享边缘角色，不参与企业归属；不属于目标企业的共享 IP 保留为全局资产，不扩大企业范围。`ip-port-mapping`、`company-attribution` Skill 与 `insert_assets` 说明同步补充判定依据和标签格式。
-- **端口探测三档预设**：`ip-port-mapping` Skill 的主动探测改为三档可选——常见端口（Top 100/1000）、危险/敏感端口（远程管理、数据库、缓存、容器编排等固定清单）、全端口（1–65535，仅限单个 IP 且明确授权），并提供 nmap/naabu 对应命令与无工具兜底；统一单主机串行、速率 ≤50 pps，要求把档位、工具与速率写入事实。
-
-### 修复
-
-- **修复企业资产页 IP 页签为空**：IP 资产没有 `root_domain`，此前归属只按企业范围里的 IP/CIDR 规则计算，企业范围只写域名时，域名解析到的 IP 永远不会带上 `company_id`。现在登记 IP（以及 subdomain/service/endpoint 的 IP 副作用）会按 `bound_domains` 匹配企业域名范围并继承归属，域名规则优先于 IP/CIDR；归属重算与启动时的存量回填使用同一规则，已有 IP 在升级后自动补入对应企业。`insert_assets` 的 `bound_domains` 说明与 `ip-port-mapping`、`company-attribution` Skill 同步要求登记解析到该 IP 的目标域名（共享 CDN 也照填，归属只继承域名范围）。
-- **任务内采集的 IP 归入任务企业**：在只关联一个企业的任务中采集到的 IP（含共享 CDN/WAF 出口），即使没有 `bound_domains`、也未命中企业 IP/CIDR/ICP 范围，也归入该任务企业；域名与 IP/CIDR/ICP 规则仍优先，多企业任务的 IP 保持未归属。登记与归属重算使用同一规则，存量 IP 在升级启动时自动回填。
-- **降低采集触发 WAF 封禁**：自动指纹探测改为同一主机串行、间隔 ≥3 秒；仅 `429`、或带 `Retry-After` 的 `503` 才暂停该主机自动探测（默认 30 分钟，服务器要求的退避更长时按服务器，最长 6 小时），`403` 与不带 `Retry-After` 的 `503` 只记录不暂停；favicon 只在 `429` 时跳过。`web-fingerprint`、`ip-port-mapping` Skill 补充各状态码含义、被动优先、每站最小请求、出口 IP/UA 报备白名单等操作规范。
-
-## [0.3.0] - 2026-11-13
-
-### 新增
-
-- **第三方资产类型 `third_party`**：资产库新增独立类型，用于登记与目标业务有关联、但主体不属于目标的第三方平台（政务平台、预约挂号、支付/办理入口等）。每条记录必须同时提供 `url`（平台自身入口）与 `evidence_url`（目标侧引用该平台的具体页面），并显式关联涉及的目标企业；`third_party` 不进入目标的域名/IP 范围，也不代表平台归属目标。资产页、任务资产页新增「第三方」页签，展示平台名称、分类、入口 URL 与佐证 URL；`insert_assets`、资产 API/CSV 导入导出、DSL 搜索与监控指纹同步支持；planner / worker / pentest 提示词与 `app-wechat-recon`、`company-attribution` Skill 增加「目标自有应用登记为 app、第三方平台登记为 third_party」的规则。
-- **版本信息一键更新**：系统配置的版本信息卡片会自动查询 GitHub 最新 Release，发现新版本时显示更新说明并提供「立即更新」。后端按当前 `GOOS/GOARCH` 下载 `hawkeye-<版本>-<os>-<arch>.zip`，用同版本的 `SHA256SUMS` 校验后暂存，再以退出码 75 交由 `start.sh` / `start.bat` 换装重启；页面轮询 `/api/health`，确认版本变化后自动刷新。Docker 下更新的是容器内程序，重建容器会回到镜像版本，镜像级升级仍用 `./update.sh`；无法直连 GitHub 时可设置 `HAWKEYE_UPDATE_PROXY`（或 `HTTPS_PROXY`），API 限流时可设置 `HAWKEYE_UPDATE_GITHUB_TOKEN`。
-
-### 修复
-
-- **修复第三方平台被登记为目标的应用资产**：`app` 资产无法靠域名范围自动归因，此前 agent 会把目标官网/公众号里「要求用户下载/使用」的第三方平台（如粤省事、粤税通、粤居码、广州健康通）也按目标企业登记。现在内置 Skill 与 planner / worker / pentest 提示词、`insert_assets` 的 `company_id` 说明统一要求：只有商店开发者、认证主体、备案主体与目标一致（或目标官方明确声明自有）的 App / 公众号 / 小程序才算目标资产；仅作为办理入口被提及的不登记、不归属，必要时只 `record_fact`。
-
-## [0.2.0] - 2026-11-13
-
-### 新增
-
+- **移动端与微信生态采集**：新增 `app-wechat-recon` 内置 Skill，从官网、应用商店与公开搜索页采集移动 App、微信公众号/服务号、小程序的名称、平台形态、包名/Bundle ID/公开 AppID、开发者、备案与归属，统一登记为 `app` 资产；采集清单同步补充到 worker / planner / pentest 提示词。
 - **自动监控（可开关）**：监控中心新增「企业 + 根域名」监控目标与周期配置；总开关（`settings.monitor.auto_enabled`，默认关闭）打开后，调度器到期发起增量采集任务——先读已有资产作基线，再通过证书日志/被动 DNS/测绘 API/子域校验发现新增子域与主机，站点登记时自动识别指纹；任务结束立即快照并 diff，新资产按根域名归属自动挂到对应企业。关闭总开关或停用单个目标即可完全停止自动采集。
 - 变更记录新增字段级差异：快照保存稳定属性（标题、技术栈、状态码、端口、解析记录等），监控中心直接显示本次变更的字段，而不是只有整行指纹变化。
 - **站点自动指纹与系统识别**：站点以 `service` 类型登记后（Agent `insert_assets`、任务初始地址、资产导入/API），服务端自动只读探测首页与 favicon，回填 `status_code` / `content_length` / `page_title` / `favicon_mmh3` / `technologies`。内置规则覆盖泛微、致远、用友、金蝶、通达、蓝凌、帆软、WordPress、DedeCMS、Discuz、宝塔、Jenkins、GitLab、Nacos、MinIO、Cloudflare、阿里云/腾讯云 CDN、创宇盾、安全狗、深信服、Fortinet 等常见 OA/ERP/CMS/中间件/WAF/CDN/安全设备，`technologies` 同时给出产品名、版本与 `OA`/`CMS`/`WAF` 等类别标签；favicon 按 Shodan/FOFA 的 MMH3 约定计算。同一 URL 5 分钟内只探一次，跨主机重定向不跟随。
 - `web-fingerprint` Skill 补充系统/产品识别规则与「先回读自动指纹、再补人工采集」的流程；worker / planner / pentest 提示词同步说明。
+- **第三方资产类型 `third_party`**：资产库新增独立类型，用于登记与目标业务有关联、但主体不属于目标的第三方平台（政务平台、预约挂号、支付/办理入口等）。每条记录必须同时提供 `url`（平台自身入口）与 `evidence_url`（目标侧引用该平台的具体页面），并显式关联涉及的目标企业；`third_party` 不进入目标的域名/IP 范围，也不代表平台归属目标。资产页、任务资产页新增「第三方」页签，展示平台名称、分类、入口 URL 与佐证 URL；`insert_assets`、资产 API/CSV 导入导出、DSL 搜索与监控指纹同步支持；planner / worker / pentest 提示词与 `app-wechat-recon`、`company-attribution` Skill 增加「目标自有应用登记为 app、第三方平台登记为 third_party」的规则。
+- **版本信息一键更新**：系统配置的版本信息卡片会自动查询 GitHub 最新 Release，发现新版本时显示更新说明并提供「立即更新」。后端按当前 `GOOS/GOARCH` 下载 `hawkeye-<版本>-<os>-<arch>.zip`，用同版本的 `SHA256SUMS` 校验后暂存，再以退出码 75 交由 `start.sh` / `start.bat` 换装重启；页面轮询 `/api/health`，确认版本变化后自动刷新。Docker 下更新的是容器内程序，重建容器会回到镜像版本，镜像级升级仍用 `./update.sh`；无法直连 GitHub 时可设置 `HAWKEYE_UPDATE_PROXY`（或 `HTTPS_PROXY`），API 限流时可设置 `HAWKEYE_UPDATE_GITHUB_TOKEN`。
+- **IP 资产 CDN/WAF 标签**：IP 资产的 `technologies` 用于记录网络角色与厂商（如 `["CDN","WAF","saaswaf"]`），资产页与任务资产页的 IP 列表新增「标签」列；`insert_assets`、资产 API 与 CSV 导入均可写入，重复登记按并集合并、不清空已有标签。DNS 富化解析到厂商加速/防护域（saaswaf、cloudflare、阿里云/腾讯云 CDN、网宿、Akamai、CloudFront 等 CNAME 指纹）时自动给解析 IP 打标。标签只描述共享边缘角色，不参与企业归属；不属于目标企业的共享 IP 保留为全局资产，不扩大企业范围。`ip-port-mapping`、`company-attribution` Skill 与 `insert_assets` 说明同步补充判定依据和标签格式。
+- **端口探测三档预设**：`ip-port-mapping` Skill 的主动探测改为三档可选——常见端口（Top 100/1000）、危险/敏感端口（远程管理、数据库、缓存、容器编排等固定清单）、全端口（1–65535，仅限单个 IP 且明确授权），并提供 nmap/naabu 对应命令与无工具兜底；统一单主机串行、速率 ≤50 pps，要求把档位、工具与速率写入事实。
+
+### 变更
+
+- 品牌更名为 Hawkeye；可执行文件改为 `hawkeye` / `hawkeye.exe`，Docker Compose 服务与容器改为 `hawkeye` / `hawkeye-pg`，安装、更新与启停脚本的输出同步更名；默认监听端口改为 `8000`（流量录制代理仍为 `8788`）。`ARTEX_*` 环境变量与 `artex_token` 保持不变。
+- Docker 镜像发布到 GHCR：`ghcr.io/y0neqnine/hawkeye`；仓库与发布流程见 https://github.com/Y0neQnine/hawkeye 。
 
 ### 修复
 
 - 资产更新时，若本次未提供 `technologies`，不再把已有技术栈清空（改为保留原值）。
-
-## [0.1.1] - 2026-11-11
-
-### 新增
-
-- 新增 `app-wechat-recon` 内置 Skill：从官网、应用商店与公开搜索页采集移动 App、微信公众号/服务号、小程序的名称、平台形态、包名/Bundle ID/公开 AppID、开发者、备案与归属，统一登记为 `app` 资产；采集清单同步补充到 worker / planner / pentest 提示词。
-
-### 变更
-
-- 部署名称统一为 Hawkeye：可执行文件改为 `hawkeye` / `hawkeye.exe`，Docker Compose 服务与容器改为 `hawkeye` / `hawkeye-pg`，安装、更新与启停脚本的输出同步更名；`ARTEX_*` 环境变量与 `artex_token` 保持不变。
-
-## [0.1.0] - 2026-11-11
-
-### 变更
-
-- **Hawkeye 首个发布版本**：基于 ARTEX 二次开发，移除攻击与漏洞相关能力（漏洞扫描、验证、利用、PoC 等），只保留资产信息收集与持续监控，形态为 Go 后端 + Next.js 前端的 Web 系统。
-- 品牌更名为 Hawkeye，默认监听端口改为 `8000`（流量录制代理仍为 `8788`）。
-- Docker 镜像发布到 GHCR：`ghcr.io/y0neqnine/hawkeye`；仓库与发布流程见 https://github.com/Y0neQnine/hawkeye 。
+- **修复企业资产页 IP 页签为空**：IP 资产没有 `root_domain`，此前归属只按企业范围里的 IP/CIDR 规则计算，企业范围只写域名时，域名解析到的 IP 永远不会带上 `company_id`。现在登记 IP（以及 subdomain/service/endpoint 的 IP 副作用）会按 `bound_domains` 匹配企业域名范围并继承归属，域名规则优先于 IP/CIDR；归属重算与启动时的存量回填使用同一规则，已有 IP 在升级后自动补入对应企业。`insert_assets` 的 `bound_domains` 说明与 `ip-port-mapping`、`company-attribution` Skill 同步要求登记解析到该 IP 的目标域名（共享 CDN 也照填，归属只继承域名范围）。
+- **任务内采集的 IP 归入任务企业**：在只关联一个企业的任务中采集到的 IP（含共享 CDN/WAF 出口），即使没有 `bound_domains`、也未命中企业 IP/CIDR/ICP 范围，也归入该任务企业；域名与 IP/CIDR/ICP 规则仍优先，多企业任务的 IP 保持未归属。登记与归属重算使用同一规则，存量 IP 在升级启动时自动回填。
+- **降低采集触发 WAF 封禁**：自动指纹探测改为同一主机串行、间隔 ≥3 秒；仅 `429`、或带 `Retry-After` 的 `503` 才暂停该主机自动探测（默认 30 分钟，服务器要求的退避更长时按服务器，最长 6 小时），`403` 与不带 `Retry-After` 的 `503` 只记录不暂停；favicon 只在 `429` 时跳过。`web-fingerprint`、`ip-port-mapping` Skill 补充各状态码含义、被动优先、每站最小请求、出口 IP/UA 报备白名单等操作规范。
+- **修复第三方平台被登记为目标的应用资产**：`app` 资产无法靠域名范围自动归因，此前 agent 会把目标官网/公众号里「要求用户下载/使用」的第三方平台（如粤省事、粤税通、粤居码、广州健康通）也按目标企业登记。现在内置 Skill 与 planner / worker / pentest 提示词、`insert_assets` 的 `company_id` 说明统一要求：只有商店开发者、认证主体、备案主体与目标一致（或目标官方明确声明自有）的 App / 公众号 / 小程序才算目标资产；仅作为办理入口被提及的不登记、不归属，必要时只 `record_fact`。
 
 ### 配置
 
 #### 变更
 
 - **数据库相关命名统一为 Hawkeye**：连接串环境变量 `ARTEX_PG_DSN` 更名为 `HAWKEYE_PG_DSN`（旧名不再读取，升级时请同步修改 `.env` / compose / 启动脚本）；`docker-compose.yml`、`.env.example`、`config.example.json`、`install.sh`、`reset-password.sh` 中的默认数据库账号与库名由 `artex` 改为 `hawkeye`，本地 Docker 数据卷与容器名由 `artex-pg` 改为 `hawkeye-pg`。可执行文件名、Go 模块路径、`artex_token` 及其余 `ARTEX_*` 环境变量保持不变。
+
+---
+
+以下为上游 ARTEX 的历史更新记录，保留备查。
 
 ## [0.3.15] - 2026-10-07
 

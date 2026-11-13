@@ -105,7 +105,7 @@ CGO_ENABLED=0 go build -tags embedui -o hawkeye ./cmd/artex
 先确认 Docker 能否直连 GHCR：
 
 ```bash
-docker pull ghcr.io/y0neqnine/hawkeye:v0.1.1
+docker pull ghcr.io/y0neqnine/hawkeye:v0.0.1
 ```
 
 - **Docker Desktop**：Settings → Resources → Proxies → Manual，HTTP 与 HTTPS 都填代理地址（如 `http://127.0.0.1:7890`），Apply & Restart。
@@ -126,7 +126,7 @@ sudo systemctl restart docker
 
 宿主机代理需允许 LAN，并放行对应端口。配好后重新执行 `./install.sh` 或 `./update.sh`，脚本会自动重试 3 次。
 
-仍拉取失败时，可改用**方式三：预编译二进制**（[Releases](https://github.com/Y0neQnine/hawkeye/releases/tag/v0.1.1) 下载 `hawkeye-0.1.1-<平台>.zip`），配合已有 PostgreSQL 运行，不依赖 GHCR。
+仍拉取失败时，可改用**方式三：预编译二进制**（[Releases](https://github.com/Y0neQnine/hawkeye/releases/tag/v0.0.1) 下载 `hawkeye-0.0.1-<平台>.zip`），配合已有 PostgreSQL 运行，不依赖 GHCR。
 
 ## 配置
 
