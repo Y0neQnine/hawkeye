@@ -171,7 +171,12 @@ Go 单体后端（`go:embed` 内嵌 Next.js 静态前端）+ PostgreSQL，Agent 
 
 ## 更新与升级
 
-Hawkeye 为私有构建，不含在线更新，页面「系统配置」只展示当前版本。
+**一键更新**：进入「系统配置 → 版本信息」，卡片会自动查询 GitHub 最新 Release；发现新版本时显示更新说明和「立即更新」按钮。点击后后端下载当前平台的 Release 包，校验 `SHA256SUMS`，暂存新程序并以退出码 `75` 交给 `start.sh` / `start.bat` 换装重启，页面会自动轮询并在新版本就绪后刷新。进行中的任务会中断。
+
+- Docker 部署更新的是**容器内程序**；重建容器（`docker compose up`）会回到镜像版本，镜像级升级仍用 `./update.sh`。
+- 容器无法直连 GitHub 时，在 `.env` 设置 `HAWKEYE_UPDATE_PROXY=http://<代理地址>`（也可用 `HTTPS_PROXY`）。
+- GitHub API 触发限流时，可设置 `HAWKEYE_UPDATE_GITHUB_TOKEN`（只需 public repo 读取权限）。
+- 更新依赖守护脚本：请通过 `start.sh`（Windows 为 `start.bat`）启动；直接运行二进制时，下载完成后需要手动重启。
 
 仓库自带 `update.sh`，与 ARTEX 一致：先 `git pull` 同步代码，再按部署方式二选一升级——
 

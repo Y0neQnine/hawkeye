@@ -197,6 +197,21 @@ export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
 
+  // 在线更新：查询 GitHub 最新 Release，并下载当前平台安装包后重启换装。
+  updateCheck: () =>
+    get<{
+      current: string;
+      latest: string;
+      available: boolean;
+      platform_asset: boolean;
+      asset: string;
+      notes: string;
+      html_url: string;
+      published_at: string;
+    }>("/system/update/check"),
+  updateApply: () =>
+    post<{ ok: boolean; current: string; latest: string; restarting: boolean }>("/system/update/apply"),
+
   // ---- auth ----
   authStatus: () => get<{ initialized: boolean }>("/auth/status"),
   login: (username: string, password: string) => post<{ token: string }>("/auth/login", { username, password }),

@@ -8,6 +8,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   DownloadIcon,
+  ExternalLinkIcon,
   GlobeIcon,
   KeyRoundIcon,
   LayoutTemplateIcon,
@@ -107,6 +108,7 @@ const TABS: { key: string; label: string; icon: LucideIcon }[] = [
   { key: "ip", label: "IP", icon: NetworkIcon },
   { key: "subdomain", label: "子域名", icon: GlobeIcon },
   { key: "app", label: "应用", icon: SmartphoneIcon },
+  { key: "third_party", label: "第三方", icon: ExternalLinkIcon },
   { key: "service", label: "服务", icon: LayoutTemplateIcon },
   { key: "endpoint", label: "接口", icon: LinkIcon },
 ];
@@ -661,6 +663,72 @@ export default function AssetsPage() {
                     className="size-7 text-muted-foreground hover:text-destructive"
                     onClick={() => openDelete([a.id])}
                     aria-label={`删除资产 ${a.app_name || a.id}`}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </AssetCard>
+        </TabsContent>
+
+        {/* 第三方 */}
+        <TabsContent value="third_party" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
+          {searchBox}
+          <AssetCard
+            cols={["", "第三方平台", "分类", "平台入口 URL", "目标侧佐证 URL", ""]}
+            loaded={loaded}
+            total={total}
+            page={page}
+            size={size}
+            onSize={setSize}
+            onPage={setPage}
+            rows={currentRows}
+            selected={selected}
+            onToggleAll={(ids) => toggleSelectAll(ids)}
+          >
+            {slice(tabData("third_party")).map((a) => (
+              <TableRow key={a.id} className={selected.has(a.id) ? "bg-muted/40" : undefined}>
+                <TableCell className="w-8 pr-0">
+                  <Checkbox checked={selected.has(a.id)} onCheckedChange={() => toggleSelect(a.id)} />
+                </TableCell>
+                <TableCell className="text-xs font-medium">{a.app_name || "—"}</TableCell>
+                <TableCell className="text-xs">{a.category || "—"}</TableCell>
+                <TableCell className="max-w-[16rem] truncate font-mono text-xs" title={a.url}>
+                  {a.url ? (
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      {a.url}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
+                <TableCell className="max-w-[16rem] truncate font-mono text-xs" title={a.evidence_url}>
+                  {a.evidence_url ? (
+                    <a
+                      href={a.evidence_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      {a.evidence_url}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
+                <TableCell className="w-8 pl-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => openDelete([a.id])}
+                    aria-label={`删除资产 ${a.app_name || a.url || a.id}`}
                   >
                     <Trash2Icon className="size-3.5" />
                   </Button>

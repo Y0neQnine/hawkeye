@@ -214,7 +214,7 @@ export interface TaskAssetView {
 }
 
 // ---- New unified asset model (new backend) ----
-export type NewAssetType = "root_domain" | "ip" | "subdomain" | "app" | "service" | "endpoint";
+export type NewAssetType = "root_domain" | "ip" | "subdomain" | "app" | "service" | "endpoint" | "third_party";
 
 export interface Asset {
   id: number;
@@ -237,6 +237,7 @@ export interface Asset {
   app_description?: string;
   app_icp?: string;
   url?: string;
+  evidence_url?: string;
   service_type?: string;
   service_name?: string;
   favicon_mmh3?: string;
@@ -300,7 +301,7 @@ export interface AssetImportResult {
 // 无资产行的根域名="r:<domain>"。in_scope=false 的是仅用于连线的灰色上下文节点。
 export interface CoverageGraphNode {
   key: string;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint";
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint" | "third_party";
   label: string;
   tested: boolean;
   in_scope: boolean;

@@ -78,7 +78,7 @@ grep -oE '(©|Copyright|版权所有)[^<]{0,60}' /tmp/home.html | head -5
 应用商店页面或官网下载页中的开发者名称、`app_icp`、Bundle ID 前缀可作为证据；应用无域名可挂靠，需在写资产时显式关联 `company_id`。
 
 - 只有**商店开发者、认证主体、备案主体与目标主体一致**，或目标官方页面明确声明自有时，才登记为目标 `app` 资产。
-- 目标材料里「要求用户去某平台办理」（第三方政务 / 医疗 / 支付 / 预约平台）只是办理入口，**不构成归属**：不登记资产，也不填 `company_id`；需要留痕时用 `record_fact` 记录入口关系。
+- 目标材料里「要求用户去某平台办理」（第三方政务 / 医疗 / 支付 / 预约平台）只是办理入口，**不构成归属**：不登记为目标 `app`，也不能把平台域名/IP 算进目标范围。确实需要记录这种关联时，用 `third_party` 类型单独登记，且必须同时给出平台自身入口 URL 与目标侧引用该平台的具体页面 URL；`company_id` 填目标企业，表示「目标与该平台有关联」而非平台归属目标。
 - 开发者或认证主体是第三方（如「XX 省政务服务和数据管理局」「XX 科技有限公司」）时，即使目标官网/公众号在指引里反复提到，也不能归到目标名下。
 
 ## 写回
@@ -95,6 +95,7 @@ add_company_scope(company="某某科技有限公司",
 - `scope` 一行一条：根域、URL、IP、CIDR、ICP、关键词；系统自动认领命中资产。
 - 拒绝裸 TLD 与过宽网段（IPv4 仅 `/16`–`/32`），非法行会在 `errors` 返回。
 - 应用资产：`insert_assets` 时传 `{"type":"app","app_name":"...","app_icp":"...","company_id":<id>}`，`company_id` 取自 `add_company_scope` 返回或 `list_companies`。
+- 第三方平台关联：`insert_assets` 传 `{"type":"third_party","app_name":"粤省事","category":"政务平台","url":"<平台入口>","evidence_url":"<目标侧引用页面>","company_id":<id>}`；两个 URL 缺一不可。
 - 中等证据必须写清推断链；弱证据只 `record_fact`，例如：`a.example.com 与 b.example.net 共用 UA-123456-1，疑似同一运营方，未确认备案主体`。
 
 ## 错误处理
@@ -106,4 +107,4 @@ add_company_scope(company="某某科技有限公司",
 | WHOIS 隐私保护 | 跳过 registrant，不推断 |
 | 同名公司已存在 | 先 `list_companies` 取 `company_id`，复用并把新范围并入，不重复建公司 |
 | 证据冲突 | 以 ICP/证书为准；冲突本身写入事实，等待规划者判断 |
-| 应用开发者是第三方，但目标材料要求用户使用 | 不归属；只 `record_fact` 记入口关系 |
+| 应用开发者是第三方，但目标材料要求用户使用 | 不归属为目标 `app`；有平台入口 + 目标侧引用页面时登记 `third_party`（company_id=目标企业），缺 URL 则只 `record_fact` 记入口关系 |

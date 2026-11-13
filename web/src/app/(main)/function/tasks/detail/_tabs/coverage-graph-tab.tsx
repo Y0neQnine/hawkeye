@@ -5,6 +5,7 @@ import type { Graph as G6Graph } from "@antv/g6";
 import {
   AppWindow,
   Building2,
+  ExternalLink,
   Globe,
   Link2,
   type LucideIcon,
@@ -43,6 +44,7 @@ const kindMeta: Record<Kind, KindMeta> = {
   ip: { label: "IP", icon: Server, iconBg: "bg-cyan-600", hex: "#0891b2", size: 28 },
   service: { label: "服务", icon: Radio, iconBg: "bg-amber-500", hex: "#f59e0b", size: 26 },
   app: { label: "App", icon: AppWindow, iconBg: "bg-fuchsia-500", hex: "#d946ef", size: 26 },
+  third_party: { label: "第三方", icon: ExternalLink, iconBg: "bg-teal-500", hex: "#14b8a6", size: 24 },
   endpoint: { label: "端点", icon: Link2, iconBg: "bg-rose-500", hex: "#f43f5e", size: 20 },
 };
 
@@ -75,6 +77,9 @@ const KIND_ICON: Record<Kind, string> = {
   ),
   app: svgUri(
     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
+  ),
+  third_party: svgUri(
+    '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   ),
   endpoint: svgUri(
     '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',

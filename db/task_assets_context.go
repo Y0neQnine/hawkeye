@@ -26,7 +26,7 @@ target AS (
   SELECT DISTINCT a.id, a.type,
          COALESCE(a.url, a.domain, a.ip, a.app_name, a.root_domain, '') AS label
   FROM assets a
-  JOIN task_scope ts ON (
+  JOIN task_scope ts ON a.type <> 'third_party' AND (
        (ts.kind='company'     AND a.company_id = ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
     OR (ts.kind='subdomain'   AND a.domain = ts.domain)
@@ -75,7 +75,7 @@ context_tasks AS (
 target AS (
   SELECT DISTINCT a.id
   FROM assets a
-  JOIN task_scope ts ON (
+  JOIN task_scope ts ON a.type <> 'third_party' AND (
        (ts.kind='company'     AND a.company_id = ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
     OR (ts.kind='subdomain'   AND a.domain = ts.domain)
@@ -212,7 +212,7 @@ context_assets AS (
   UNION
   SELECT DISTINCT a.id
   FROM assets a
-  JOIN task_scope ts ON (
+  JOIN task_scope ts ON a.type <> 'third_party' AND (
        (ts.kind='company'     AND a.company_id=ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain=ts.domain)
     OR (ts.kind='subdomain'   AND a.domain=ts.domain)

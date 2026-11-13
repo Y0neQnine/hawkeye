@@ -2,7 +2,12 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased]
+## [0.3.0] - 2026-11-13
+
+### 新增
+
+- **第三方资产类型 `third_party`**：资产库新增独立类型，用于登记与目标业务有关联、但主体不属于目标的第三方平台（政务平台、预约挂号、支付/办理入口等）。每条记录必须同时提供 `url`（平台自身入口）与 `evidence_url`（目标侧引用该平台的具体页面），并显式关联涉及的目标企业；`third_party` 不进入目标的域名/IP 范围，也不代表平台归属目标。资产页、任务资产页新增「第三方」页签，展示平台名称、分类、入口 URL 与佐证 URL；`insert_assets`、资产 API/CSV 导入导出、DSL 搜索与监控指纹同步支持；planner / worker / pentest 提示词与 `app-wechat-recon`、`company-attribution` Skill 增加「目标自有应用登记为 app、第三方平台登记为 third_party」的规则。
+- **版本信息一键更新**：系统配置的版本信息卡片会自动查询 GitHub 最新 Release，发现新版本时显示更新说明并提供「立即更新」。后端按当前 `GOOS/GOARCH` 下载 `hawkeye-<版本>-<os>-<arch>.zip`，用同版本的 `SHA256SUMS` 校验后暂存，再以退出码 75 交由 `start.sh` / `start.bat` 换装重启；页面轮询 `/api/health`，确认版本变化后自动刷新。Docker 下更新的是容器内程序，重建容器会回到镜像版本，镜像级升级仍用 `./update.sh`；无法直连 GitHub 时可设置 `HAWKEYE_UPDATE_PROXY`（或 `HTTPS_PROXY`），API 限流时可设置 `HAWKEYE_UPDATE_GITHUB_TOKEN`。
 
 ### 修复
 

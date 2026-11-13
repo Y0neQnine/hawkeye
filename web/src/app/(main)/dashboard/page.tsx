@@ -75,6 +75,7 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   ip: "IP",
   subdomain: "子域名",
   app: "应用",
+  third_party: "第三方",
   service: "服务",
   endpoint: "端点",
 };
@@ -84,6 +85,7 @@ const ASSET_COLORS: Record<string, string> = {
   ip: "bg-indigo-400",
   subdomain: "bg-violet-500",
   app: "bg-orange-400",
+  third_party: "bg-teal-500",
   service: "bg-cyan-500",
   endpoint: "bg-emerald-500",
 };

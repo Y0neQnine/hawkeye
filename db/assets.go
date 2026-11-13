@@ -39,6 +39,8 @@ type Asset struct {
 	Category       string `json:"category,omitempty"`
 	AppDescription string `json:"app_description,omitempty"`
 	AppICP         string `json:"app_icp,omitempty"`
+	// third_party fields (url = platform entry, evidence_url = target-side reference)
+	EvidenceURL string `json:"evidence_url,omitempty"`
 	// service fields
 	URL           string           `json:"url,omitempty"`
 	ServiceType   string           `json:"service_type,omitempty"`
@@ -662,6 +664,107 @@ RETURNING id`, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, t
 }
 
 // =====================================================================
+// UpsertThirdParty
+// =====================================================================
+
+// UpsertThirdPartyReq is the input for UpsertThirdParty.
+type UpsertThirdPartyReq struct {
+	Name        string // platform / product name, defaults to the entry host
+	Category    string
+	Description string
+	URL         string // platform entry point (required)
+	EvidenceURL string // target-side page referencing the platform (required)
+	CompanyID   *int64 // company whose assets involve this platform
+	TaskID      int64
+}
+
+// normalizeHTTPURL trims and validates an absolute http(s) URL.
+func normalizeHTTPURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("must be an absolute http(s) URL: %s", raw)
+	}
+	return normalizeURL(raw), nil
+}
+
+// UpsertThirdParty idempotently inserts or merges a third_party asset. Both the
+// platform entry URL and the target-side evidence URL are required so a third
+// party is only recorded when there is concrete involvement with the target.
+func (s *AssetStore) UpsertThirdParty(req UpsertThirdPartyReq) (int64, error) {
+	entry, err := normalizeHTTPURL(req.URL)
+	if err != nil {
+		return 0, fmt.Errorf("third_party url: %w", err)
+	}
+	evidence, err := normalizeHTTPURL(req.EvidenceURL)
+	if err != nil {
+		return 0, fmt.Errorf("third_party evidence_url: %w", err)
+	}
+	if s.tx == nil {
+		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
+			return scoped.UpsertThirdParty(req)
+		})
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		if u, parseErr := url.Parse(entry); parseErr == nil {
+			name = u.Hostname()
+		}
+	}
+	var taskIDs string
+	if req.TaskID > 0 {
+		taskIDs = fmt.Sprintf("{%d}", req.TaskID)
+	} else {
+		taskIDs = "{}"
+	}
+	var catVal, descVal, companyIDVal any
+	companySource := "scope"
+	if req.Category != "" {
+		catVal = req.Category
+	}
+	if req.Description != "" {
+		descVal = req.Description
+	}
+	if req.CompanyID != nil {
+		companyIDVal = *req.CompanyID
+		companySource = "explicit"
+	}
+
+	var id int64
+	err = s.tx.QueryRow(`
+INSERT INTO assets(type, url, evidence_url, app_name, category, app_description, company_id, company_source, task_ids)
+VALUES ('third_party', $1, $2, $3, $4, $5, $6, $7, $8::bigint[])
+ON CONFLICT (url, COALESCE(company_id,0)) WHERE type = 'third_party' DO UPDATE SET
+    evidence_url    = EXCLUDED.evidence_url,
+    app_name        = COALESCE(EXCLUDED.app_name, assets.app_name),
+    category        = COALESCE(EXCLUDED.category, assets.category),
+    app_description = COALESCE(EXCLUDED.app_description, assets.app_description),
+    company_id      = CASE
+        WHEN EXCLUDED.company_source = 'explicit' THEN EXCLUDED.company_id
+        WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
+        ELSE COALESCE(EXCLUDED.company_id, assets.company_id)
+    END,
+    company_source  = CASE
+        WHEN EXCLUDED.company_source = 'explicit' THEN 'explicit'
+        WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN 'explicit'
+        WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
+        ELSE assets.company_source
+    END,
+    task_ids        = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
+    last_seen       = now()
+RETURNING id`, entry, evidence, name, catVal, descVal, companyIDVal, companySource, taskIDs).Scan(&id)
+	return id, err
+}
+
+// =====================================================================
 // UpsertHTTPService
 // =====================================================================
 
@@ -1080,7 +1183,7 @@ SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
-       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
+       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text, COALESCE(evidence_url,'')
 FROM assets
 WHERE type = $1` + pageClause(&args, limit, offset)
 	rows, err := s.db.Query(q, args...)
@@ -1110,7 +1213,7 @@ func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit, offset i
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
-       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
+       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text, COALESCE(evidence_url,'')
 FROM assets WHERE company_id = $1`
 	args := []any{companyID}
 	if typ != "" {
@@ -1162,7 +1265,7 @@ func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
-       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
+       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text, COALESCE(evidence_url,'')
 FROM assets WHERE $1 = ANY(task_ids)`
 	args := []any{taskID}
 	if typ != "" {
@@ -1360,7 +1463,7 @@ const assetSelectCols = `SELECT id, type, company_id, array_to_json(task_ids)::t
        COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
-       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
+       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text, COALESCE(evidence_url,'')
 FROM assets`
 
 // GetByIDs returns assets with the given ids (order preserved by id array order).
@@ -1517,7 +1620,7 @@ func scanAssets(rows *sql.Rows) ([]*Asset, error) {
 			&a.URL, &a.ServiceType, &a.ServiceName,
 			&a.FaviconMMH3, &statusCode, &contentLength,
 			&a.PageTitle, &techsRaw, &authRaw,
-			&a.Method, &paramsRaw, &extraRaw, &a.LastSeen,
+			&a.Method, &paramsRaw, &extraRaw, &a.LastSeen, &a.EvidenceURL,
 		); err != nil {
 			return nil, err
 		}

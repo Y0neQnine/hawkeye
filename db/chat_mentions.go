@@ -34,7 +34,7 @@ type chatMentionCursor struct {
 
 func ValidChatMentionKind(kind string) bool {
 	switch kind {
-	case "company", "asset", "endpoint", "ip", "app", "root_domain", "subdomain", "service":
+	case "company", "asset", "endpoint", "ip", "app", "root_domain", "subdomain", "service", "third_party":
 		return true
 	}
 	return false

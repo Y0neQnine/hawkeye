@@ -40,7 +40,7 @@ CREATE TRIGGER trg_companies_upd BEFORE UPDATE ON companies
 CREATE TABLE IF NOT EXISTS assets (
     id              BIGSERIAL PRIMARY KEY,
     type            TEXT NOT NULL CHECK (type IN (
-                        'root_domain','ip','subdomain','app','service','endpoint'
+                        'root_domain','ip','subdomain','app','service','endpoint','third_party'
                     )),
     company_id      BIGINT REFERENCES companies(id) ON DELETE SET NULL,
     -- explicit: caller/user selected the company; scope: derived from company_scope.
@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS assets (
     app_description TEXT,
     app_icp         TEXT,
     url             TEXT,
+    -- third_party: url is the platform entry point; evidence_url is the
+    -- target-side page that references it (the ownership/relevance proof).
+    evidence_url    TEXT,
     service_type    TEXT CHECK (service_type IN ('http','other')),
     service_name    TEXT,
     favicon_mmh3    TEXT,
@@ -89,6 +92,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_http ON assets(url) WHERE type 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_other
     ON assets(COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE type = 'service' AND service_type = 'other';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_endpoint     ON assets(url, method) WHERE type = 'endpoint';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_third_party
+    ON assets(url, COALESCE(company_id,0)) WHERE type = 'third_party';
 CREATE INDEX IF NOT EXISTS idx_av2_company      ON assets(company_id)       WHERE company_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_company_type ON assets(company_id, type) WHERE company_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_task_ids     ON assets USING GIN(task_ids);
@@ -108,6 +113,12 @@ ALTER TABLE assets ALTER COLUMN company_source SET NOT NULL;
 ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_company_source_check;
 ALTER TABLE assets ADD CONSTRAINT assets_company_source_check
     CHECK (company_source IN ('explicit','scope'));
+-- third_party asset type: third-party platform entry + the target-side page that
+-- references it. Idempotent per (entry url, company).
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS evidence_url TEXT;
+ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_type_check;
+ALTER TABLE assets ADD CONSTRAINT assets_type_check
+    CHECK (type IN ('root_domain','ip','subdomain','app','service','endpoint','third_party'));
 DROP TRIGGER IF EXISTS trg_av2_upd ON assets;
 CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -27,9 +27,12 @@ func assetInterceptCandidates(item assetInputItem) (domains, ips, urls []string)
 	}
 	add(&ips, item.IP)
 	add(&ips, item.ServiceIP)
-	add(&urls, item.URL)
-	if item.URL != "" {
-		if u, err := url.Parse(item.URL); err == nil {
+	for _, raw := range []string{item.URL, item.EvidenceURL} {
+		add(&urls, raw)
+		if raw == "" {
+			continue
+		}
+		if u, err := url.Parse(raw); err == nil {
 			if h := u.Hostname(); h != "" {
 				if net.ParseIP(h) != nil {
 					add(&ips, h)
@@ -77,7 +80,7 @@ func (t *ToolSet) SetAssetStore(as *db.AssetStore, cs *db.CompanyStore) {
 
 // assetInputItem is one element of the insert_assets "assets" array.
 type assetInputItem struct {
-	Type string `json:"type"` // root_domain|ip|subdomain|app|service|endpoint
+	Type string `json:"type"` // root_domain|ip|subdomain|app|service|endpoint|third_party
 
 	// ---- root_domain / subdomain ----
 	Domain      string   `json:"domain"`
@@ -96,7 +99,10 @@ type assetInputItem struct {
 	Category    string `json:"category"`
 	Description string `json:"description"`
 	AppICP      string `json:"app_icp"`
-	CompanyID   *int64 `json:"company_id"` // explicit company link (app only; others auto-attribute via scope)
+	CompanyID   *int64 `json:"company_id"` // explicit company link (app/third_party; others auto-attribute via scope)
+
+	// ---- third_party ----
+	EvidenceURL string `json:"evidence_url"` // target-side page referencing the third party
 
 	// ---- service (http) ----
 	URL           string           `json:"url"`
@@ -123,10 +129,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 	return writeTool(
 		"insert_assets",
 		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
-			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
+			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method；third_party→url+evidence_url+company_id。其余字段含义见各自说明。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"service(HTTP) 只要给 url 即可：系统会自动只读探测首页并识别系统/技术栈（status_code/content_length/page_title/technologies/favicon_mmh3），随后可用 list_assets 回读，无需重复手工抓取。\n"+
-			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。只登记目标主体自己发布/运营的应用（开发者/认证主体/备案主体一致）；第三方平台仅作为办理入口被提到时不登记。\n"+
+			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。只登记目标主体自己发布/运营的应用（开发者/认证主体/备案主体一致）；第三方平台不登记为 app。\n"+
+			"third_party 用于目标业务涉及的第三方平台（政务平台、预约挂号平台、支付/办理入口等）：url 填平台自身的入口地址，evidence_url 填目标侧引用该平台的具体页面（官网指引、公告、办事说明等），两个 URL 都必须提供且指向不同位置；缺 evidence_url 会被拒绝。company_id 填涉及该平台的目标企业。third_party 表示'目标与该平台有关联'，不代表平台属于目标，也不会进入目标的域名/IP 范围。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
@@ -136,7 +143,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				"items": obj(map[string]any{
 					"type": map[string]any{
 						"type":        "string",
-						"enum":        []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"},
+						"enum":        []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint", "third_party"},
 						"description": "资产类型",
 					},
 					// root_domain / subdomain
@@ -164,14 +171,15 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						}, "port"),
 					},
 					// app
-					"app_name":    str("应用/账号/小程序名称（app 类型必填）"),
+					"app_name":    str("应用/账号/小程序名称（app 类型必填）；third_party 类型填第三方平台名称（可选，缺省取入口 URL 主机名）"),
 					"bundle_id":   str("iOS Bundle ID / Android 包名 / 公开微信 AppID（app 类型可选，有则填，用于去重）"),
-					"category":    str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序（可选，建议填）"),
-					"description": str("描述：开发者/认证主体 + 下载或入口 URL（可选）"),
+					"category":    str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序；third_party 可填 政务平台/预约挂号平台/支付平台 等（可选，建议填）"),
+					"description": str("描述：开发者/认证主体 + 下载或入口 URL；third_party 填该平台与目标的关联说明（可选）"),
 					"app_icp":     str("应用 ICP 备案（可选）"),
-					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）。仅当应用确属该企业（商店开发者/认证主体/备案主体一致，或官方声明自有）时才填；仅作为第三方办理入口被提到的不登记、不填"),
+					"company_id":  intp("归属企业 id。app：仅当应用确属该企业（商店开发者/认证主体/备案主体一致，或官方声明自有）时才填，第三方平台不填；third_party：必填，填业务上涉及该平台的目标企业。id 由 add_company_scope 返回"),
+					"evidence_url": str("third_party 必填：目标侧引用该第三方平台的具体页面 URL（官网指引/公告/办事说明），须与 url 不同；用于证明关联真实存在"),
 					// service (http)
-					"url":         str("完整 URL，含协议和端口（HTTP 服务必填；service_type 自动设为 http）"),
+					"url":         str("完整 URL，含协议和端口（HTTP 服务必填，service_type 自动设为 http）；third_party 填平台自身入口 URL（必填）"),
 					"status_code": intp("HTTP 响应状态码，如 200/301/403/404（可选）"),
 					"content_length": map[string]any{
 						"type":        "integer",
@@ -328,6 +336,21 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						Params: item.Params,
 						IP:     item.ServiceIP,
 						TaskID: taskID,
+					})
+
+				case "third_party":
+					if item.CompanyID == nil {
+						errs = append(errs, errEntry{Index: i, Error: "third_party 需要 company_id（涉及该平台的目标企业）"})
+						continue
+					}
+					id, err = t.as.UpsertThirdParty(db.UpsertThirdPartyReq{
+						Name:        item.AppName,
+						Category:    item.Category,
+						Description: item.Description,
+						URL:         item.URL,
+						EvidenceURL: item.EvidenceURL,
+						CompanyID:   item.CompanyID,
+						TaskID:      taskID,
 					})
 
 				default:
@@ -540,11 +563,11 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 		"查询资产库：DSL 表达式搜索，或按 id/ids 直取；支持分页。只返回【本任务及直接关联任务】采集范围内的资产。\n"+
 			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。资产类型用独立 type 参数，不写进 DSL。\n"+
 			"未传 id/ids 时 dsl 必须非空（不允许无条件全量查询）。\n"+
-			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、bundle_id、category(如 微信公众号/微信小程序)、app_icp、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
+			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、evidence_url(第三方平台的目标侧佐证页)、page_title、icp、service_name、app_name、bundle_id、category(如 微信公众号/微信小程序/第三方平台)、app_icp、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
 			"示例：status_code>=400 AND technology=shiro ；(port==80 OR port==443) AND technology=nginx ；查微信生态：type 传 app、dsl 写 category=微信",
 		obj(map[string]any{
 			"dsl":    str(`DSL 查询表达式（语法/字段见工具描述）。未传 id/ids 时必须非空。`),
-			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
+			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint|third_party（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
 			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
 			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
 			"limit":  intp("返回上限，默认 10（可选）"),

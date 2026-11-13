@@ -5,6 +5,7 @@ import * as React from "react";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
+  ExternalLinkIcon,
   GlobeIcon,
   KeyRoundIcon,
   LayoutTemplateIcon,
@@ -61,6 +62,7 @@ const TABS: { key: NewAssetType; label: string; icon: LucideIcon }[] = [
   { key: "ip", label: "IP", icon: NetworkIcon },
   { key: "subdomain", label: "子域名", icon: GlobeIcon },
   { key: "app", label: "应用", icon: SmartphoneIcon },
+  { key: "third_party", label: "第三方", icon: ExternalLinkIcon },
   { key: "service", label: "服务", icon: LayoutTemplateIcon },
   { key: "endpoint", label: "接口", icon: LinkIcon },
 ];
@@ -77,6 +79,8 @@ function assetLabel(asset: Asset): string {
     case "ip":
       return firstText([asset.ip], `#${asset.id}`);
     case "app":
+      return firstText([asset.app_name, asset.url], `#${asset.id}`);
+    case "third_party":
       return firstText([asset.app_name, asset.url], `#${asset.id}`);
     case "service": {
       const host = firstText([asset.ip, asset.domain], "");
@@ -577,6 +581,30 @@ export function AssetsTab({ taskId }: { taskId: string }) {
                 <TableCell className="max-w-48 truncate text-xs">{asset.page_title || "—"}</TableCell>
                 <TableCell>
                   <Chips items={asset.technologies ?? []} />
+                </TableCell>
+                <TableCell>
+                  <SourceCell asset={asset} />
+                </TableCell>
+                <TableCell className="w-16">{removeButton(asset)}</TableCell>
+              </TableRow>
+            ))}
+          </AssetCard>
+        </TabsContent>
+
+        <TabsContent value="third_party" className="mt-0 flex min-h-0 flex-1 flex-col">
+          <AssetCard
+            cols={["第三方平台", "分类", "平台入口 URL", "目标侧佐证 URL", "来源", "操作"]}
+            {...commonCardProps}
+          >
+            {rows.map((asset) => (
+              <TableRow key={asset.id}>
+                <TableCell className="max-w-48 truncate font-medium text-xs">{asset.app_name || "—"}</TableCell>
+                <TableCell className="text-xs">{asset.category || "—"}</TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-xs" title={asset.url}>
+                  {asset.url || "—"}
+                </TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-xs" title={asset.evidence_url}>
+                  {asset.evidence_url || "—"}
                 </TableCell>
                 <TableCell>
                   <SourceCell asset={asset} />

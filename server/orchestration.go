@@ -458,6 +458,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedWorkerPrompt()        // worker 提示词:加否定结论证据门槛(一次性)
 	s.reseedBrandPrompts()        // Hawkeye 改造:内置提示词统一为采集导向(一次性)
 	s.reseedAppOwnershipPrompts() // app 归属:第三方办理入口不登记为目标资产(一次性)
+	s.reseedThirdPartyPrompts()   // third_party 类型:第三方平台须双 URL 才登记(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/list_companies 连同 pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
@@ -468,7 +469,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v8_app_ownership"
+	const flag = "tool_schema_refresh_v9_third_party"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -697,6 +698,36 @@ func (s *Server) reseedAppOwnershipPrompts() {
 		}
 	}
 	log.Printf("[prompts] 移动端/微信生态提示词已按 app 归属规则重刷(一次性)")
+}
+
+// reseedThirdPartyPrompts 把采集类提示词刷成【当前代码默认】——新增 third_party
+// 资产类型：目标业务涉及的第三方平台不再拒之门外，但必须以「平台入口 URL +
+// 目标侧引用页面 URL」双 URL 登记，且不归属目标。flag 守卫只做一次。
+func (s *Server) reseedThirdPartyPrompts() {
+	const flag = "hawkeye_prompt_third_party_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	seeds := agent.BuiltinPromptSeeds()
+	for _, key := range []string{"planner", "worker", "pentest"} {
+		tmpl := seeds[key]
+		if tmpl == "" {
+			continue
+		}
+		a, err := s.m.pg.GetAgentByKey(key)
+		if err != nil || a == nil {
+			continue
+		}
+		if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+			continue
+		}
+		if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+			log.Printf("[prompts] %s 提示词重刷为 third_party 默认失败: %v", key, err)
+			continue
+		}
+	}
+	log.Printf("[prompts] 第三方平台提示词已按 third_party 规则重刷(一次性)")
 }
 
 // seedPlannerListAssetsBinding adds "planner" to list_assets's binding ONCE

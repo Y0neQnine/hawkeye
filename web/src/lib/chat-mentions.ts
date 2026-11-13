@@ -4,6 +4,7 @@ export const mentionKinds = [
   { kind: "endpoint", label: "接口", alias: "api" },
   { kind: "ip", label: "IP", alias: "ip" },
   { kind: "app", label: "应用", alias: "app" },
+  { kind: "third_party", label: "第三方", alias: "third_party" },
   { kind: "root_domain", label: "域名", alias: "domain" },
   { kind: "subdomain", label: "子域名", alias: "subdomain" },
   { kind: "service", label: "服务", alias: "service" },
@@ -51,7 +52,7 @@ export function mentionToken(item: ChatMention) {
 }
 
 export function selectedMentions(value: string) {
-  return [...value.matchAll(/@\[(资产|企业|接口|IP|应用|域名|子域名|服务)#([0-9]+)(?: ([^\]\r\n]*))?\]/g)].map(
+  return [...value.matchAll(/@\[(资产|企业|接口|IP|应用|域名|子域名|服务|第三方)#([0-9]+)(?: ([^\]\r\n]*))?\]/g)].map(
     (match) => ({
       token: match[0],
       label: `${match[1]} #${match[2]}${match[3] ? ` · ${match[3]}` : ""}`,

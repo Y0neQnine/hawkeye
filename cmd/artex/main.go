@@ -56,6 +56,13 @@ func run() int {
 	)
 	flag.Parse()
 
+	// A staged one-click update is swapped in before anything opens the DB:
+	// swapping while serving would leave this process on the old code and make
+	// /api/health report the wrong version.
+	if server.ApplyPendingUpdate() {
+		return server.UpdateExitCode
+	}
+
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.
 	server.BuildVersion = version

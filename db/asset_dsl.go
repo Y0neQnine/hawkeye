@@ -32,6 +32,7 @@ var knownStringFields = map[string]string{
 	"root_domain":  "root_domain",
 	"ip":           "ip",
 	"url":          "url",
+	"evidence_url": "evidence_url",
 	"page_title":   "page_title",
 	"title":        "page_title",
 	"icp":          "icp",
@@ -253,7 +254,7 @@ func ParseDSL(s string) (*astNode, error) {
 
 // fullTextCols are searched for bare-text tokens.
 var fullTextCols = []string{
-	"domain", "root_domain", "ip", "url", "page_title",
+	"domain", "root_domain", "ip", "url", "evidence_url", "page_title",
 	"icp", "service_name", "app_name", "app_description",
 }
 

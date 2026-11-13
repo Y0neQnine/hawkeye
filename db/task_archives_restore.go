@@ -523,6 +523,9 @@ func findArchiveAssetNaturalID(tx *sql.Tx, row map[string]any) (int64, bool, err
 		}
 	case "endpoint":
 		query, args = `SELECT id FROM assets WHERE type='endpoint' AND url=$1 AND method=$2`, []any{stringValue("url"), stringValue("method")}
+	case "third_party":
+		companyID, _ := jsonInt64(row["company_id"])
+		query, args = `SELECT id FROM assets WHERE type='third_party' AND url=$1 AND COALESCE(company_id,0)=$2`, []any{stringValue("url"), companyID}
 	default:
 		return 0, false, fmt.Errorf("unsupported archived asset type %q", typeName)
 	}

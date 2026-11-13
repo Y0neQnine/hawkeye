@@ -473,6 +473,9 @@ type assetInput struct {
 	Category    string `json:"category"`
 	Description string `json:"description"`
 	AppICP      string `json:"app_icp"`
+	CompanyID   *int64 `json:"company_id"`
+	// third_party
+	EvidenceURL string `json:"evidence_url"`
 	// service http
 	URL           string           `json:"url"`
 	Technologies  []string         `json:"technologies"`
@@ -529,7 +532,7 @@ func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, prob
 		case "subdomain":
 			id, err = as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: a.Domain, RecordType: a.RecordType, RecordValue: a.RecordValue, ICP: a.ICP, TaskID: taskID})
 		case "app":
-			id, err = as.UpsertApp(db.UpsertAppReq{Name: a.AppName, BundleID: a.BundleID, Category: a.Category, Description: a.Description, ICP: a.AppICP, TaskID: taskID})
+			id, err = as.UpsertApp(db.UpsertAppReq{Name: a.AppName, BundleID: a.BundleID, Category: a.Category, Description: a.Description, ICP: a.AppICP, CompanyID: a.CompanyID, TaskID: taskID})
 		case "service":
 			if a.URL != "" {
 				svcIP := a.ServiceIP
@@ -546,6 +549,8 @@ func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, prob
 				svcIP = a.IP
 			}
 			id, err = as.UpsertEndpoint(db.UpsertEndpointReq{URL: a.URL, Method: a.Method, Params: a.Params, IP: svcIP, TaskID: taskID})
+		case "third_party":
+			id, err = as.UpsertThirdParty(db.UpsertThirdPartyReq{Name: a.AppName, Category: a.Category, Description: a.Description, URL: a.URL, EvidenceURL: a.EvidenceURL, CompanyID: a.CompanyID, TaskID: taskID})
 		default:
 			errs = append(errs, assetInsertError{Index: i, Error: "unknown type: " + a.Type})
 			continue
@@ -591,7 +596,7 @@ var assetExportHeader = []string{
 	"type", "domain", "root_domain", "ip", "port", "service_name", "url", "method",
 	"record_type", "record_value", "icp", "app_name", "bundle_id", "category", "app_icp",
 	"bound_domains", "open_ports", "status_code", "content_length", "page_title",
-	"technologies", "favicon_mmh3", "params", "auth", "last_seen",
+	"technologies", "favicon_mmh3", "params", "auth", "last_seen", "evidence_url",
 }
 
 func exportCellString(v any) string {
@@ -639,10 +644,11 @@ func exportAssetRow(a *db.Asset) []string {
 		statusCode, contentLength, a.PageTitle,
 		strings.Join(a.Technologies, "|"), a.FaviconMMH3,
 		exportCellString(a.Params), exportCellString(a.Auth), a.LastSeen,
+		a.EvidenceURL,
 	}
 }
 
-var exportableAssetTypes = []string{"root_domain", "subdomain", "ip", "service", "app", "endpoint"}
+var exportableAssetTypes = []string{"root_domain", "subdomain", "ip", "service", "app", "endpoint", "third_party"}
 
 // exportAssetLimit caps a DSL-filtered export; unfiltered company/task exports
 // use the stores' unlimited queries instead.
@@ -822,6 +828,7 @@ func parseAssetImportCSV(records [][]string, headerIdx int) ([]assetInput, []ass
 			Category:    get(rec, "category"),
 			AppICP:      get(rec, "app_icp"),
 			URL:         get(rec, "url"),
+			EvidenceURL: get(rec, "evidence_url"),
 			ServiceIP:   get(rec, "service_ip"),
 			PageTitle:   get(rec, "page_title"),
 			FaviconMMH3: get(rec, "favicon_mmh3"),
@@ -895,6 +902,13 @@ func validateImportedAsset(in assetInput) error {
 	case "endpoint":
 		if in.URL == "" {
 			return fmt.Errorf("缺少 url")
+		}
+	case "third_party":
+		if in.URL == "" {
+			return fmt.Errorf("缺少平台入口 url")
+		}
+		if in.EvidenceURL == "" {
+			return fmt.Errorf("缺少 evidence_url（目标侧引用该平台的具体页面）")
 		}
 	default:
 		return fmt.Errorf("未知类型: %q", in.Type)

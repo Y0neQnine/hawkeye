@@ -64,6 +64,7 @@ const ASSET_TYPES = [
   { value: "subdomain", label: "子域名" },
   { value: "ip", label: "IP" },
   { value: "app", label: "应用" },
+  { value: "third_party", label: "第三方" },
   { value: "service", label: "服务" },
   { value: "endpoint", label: "接口" },
 ];
@@ -85,6 +86,7 @@ const FIELD_LABELS: Record<string, string> = {
   ip: "IP",
   port: "端口",
   url: "URL",
+  evidence_url: "佐证 URL",
   service_name: "服务名",
   service_type: "服务类型",
   status_code: "状态码",

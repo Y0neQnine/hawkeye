@@ -319,7 +319,7 @@ target AS (
   SELECT DISTINCT a.id, a.type,
          COALESCE(a.url, a.domain, a.ip, a.app_name, a.root_domain, '') AS label
   FROM assets a
-  JOIN task_scope ts ON ts.task_id = $1 AND (
+  JOIN task_scope ts ON ts.task_id = $1 AND a.type <> 'third_party' AND (
        (ts.kind='company'     AND a.company_id = ts.company_id)
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
     OR (ts.kind='subdomain'   AND a.domain = ts.domain)
@@ -579,7 +579,7 @@ WHERE type='root_domain' AND domain=$1 LIMIT 1`, root).Scan(&id, &companyID)
 		switch n.Kind {
 		case "subdomain":
 			link(n.Key, rootByDomain[n.RootDomain])
-		case "root_domain", "app", "ip":
+		case "root_domain", "app", "ip", "third_party":
 			if n.CompanyID > 0 {
 				link(n.Key, companyKey(n.CompanyID))
 			}
@@ -604,7 +604,7 @@ func coverageNodeLabel(n *CoverageGraphNode) string {
 		if n.URL != "" {
 			return n.URL
 		}
-	case "app":
+	case "app", "third_party":
 		if n.AppName != "" {
 			return n.AppName
 		}
