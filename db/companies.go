@@ -480,8 +480,9 @@ ON CONFLICT (company_id, kind, value) WHERE kind IN ('icp','keyword') DO NOTHING
 }
 
 // RecomputeAttribution rebuilds only scope-derived ownership. Explicit company
-// links are immutable under scope edits. Precedence is domain, IP/CIDR, then
-// normalized exact ICP; keyword rules never attribute assets.
+// links are immutable under scope edits. Precedence is domain (root_domain for
+// host assets, bound_domains for IP assets), IP/CIDR, then normalized exact ICP;
+// keyword rules never attribute assets.
 func (s *CompanyStore) RecomputeAttribution() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -531,6 +532,31 @@ WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
 	}
 
+	// IP assets have no root_domain; they inherit the company of the domains they
+	// are bound to (an address serving a scoped site). This runs before IP/CIDR so
+	// domain evidence keeps its precedence, including for shared CDN addresses.
+	if _, err := tx.Exec(`
+WITH matched AS (
+    SELECT DISTINCT ON (a.id) a.id AS asset_id, cs.company_id
+    FROM assets a
+    JOIN company_scope cs ON cs.kind = 'domain'
+      AND EXISTS (
+          SELECT 1 FROM unnest(a.bound_domains) AS d(domain)
+          WHERE d.domain = cs.domain
+             OR right(d.domain, length(cs.domain) + 1) = '.' || cs.domain
+      )
+    WHERE a.company_id IS NULL
+      AND a.type = 'ip'
+      AND cardinality(a.bound_domains) > 0
+    ORDER BY a.id, length(cs.domain) DESC, cs.company_id
+)
+UPDATE assets a
+SET company_id = matched.company_id, company_source = 'scope'
+FROM matched
+WHERE a.id = matched.asset_id`); err != nil {
+		return "", err
+	}
+
 	// IP/CIDR attribution for still-unowned assets.
 	if _, err := tx.Exec(`
 WITH matched AS (
@@ -567,6 +593,26 @@ UPDATE assets a
 SET company_id = matched.company_id, company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
+		return "", err
+	}
+	// Task-company fallback: an address collected under a task opened for exactly
+	// one company belongs to that company when no scope rule claimed it. Addresses
+	// seen by tasks of several companies stay unowned instead of guessing.
+	if _, err := tx.Exec(`
+WITH matched AS (
+    SELECT a.id AS asset_id, min(ts.company_id) AS company_id,
+           count(DISTINCT ts.company_id) AS n
+    FROM assets a
+    JOIN task_scope ts ON ts.kind = 'company' AND ts.company_id IS NOT NULL
+      AND ts.task_id = ANY(a.task_ids)
+    WHERE a.company_id IS NULL
+      AND a.type = 'ip'
+    GROUP BY a.id
+)
+UPDATE assets a
+SET company_id = matched.company_id, company_source = 'scope'
+FROM matched
+WHERE a.id = matched.asset_id AND matched.n = 1`); err != nil {
 		return "", err
 	}
 	return malformedIPAssetWarning(tx)

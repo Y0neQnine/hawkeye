@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // UserAgent is sent on every probe request so operators can tell collection
@@ -43,6 +44,9 @@ type Observation struct {
 	Technologies  []string `json:"technologies"`
 	Matches       []Match  `json:"matches"`
 	FaviconMMH3   string   `json:"favicon_mmh3,omitempty"`
+	// RetryAfter is the server-requested backoff (429/503), zero when absent or
+	// unparsable.
+	RetryAfter time.Duration `json:"-"`
 }
 
 const (
@@ -77,16 +81,42 @@ func Probe(ctx context.Context, client *http.Client, rawURL string) (*Observatio
 		ContentLength: int64(len(body)),
 		PageTitle:     extractTitle(body),
 		Server:        resp.Header.Get("Server"),
+		RetryAfter:    parseRetryAfter(resp.Header.Get("Retry-After")),
 	}
 	obs.Matches = Identify(resp.Header, resp.Cookies(), body)
 	obs.Technologies = Technologies(obs.Matches)
 
-	if iconURL := pickFaviconURL(resp.Request.URL, body); iconURL != "" {
-		if raw, ok := fetchFavicon(ctx, client, iconURL); ok {
-			obs.FaviconMMH3 = FaviconMMH3(raw)
+	// 429 is an explicit rate limit; fetching the icon would just add traffic from
+	// an address the server is already throttling. Other statuses (403/503) are
+	// ambiguous and do not suppress the favicon.
+	if resp.StatusCode != http.StatusTooManyRequests {
+		if iconURL := pickFaviconURL(resp.Request.URL, body); iconURL != "" {
+			if raw, ok := fetchFavicon(ctx, client, iconURL); ok {
+				obs.FaviconMMH3 = FaviconMMH3(raw)
+			}
 		}
 	}
 	return obs, nil
+}
+
+// parseRetryAfter accepts both forms of Retry-After: delay-seconds and HTTP-date.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 var reTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)

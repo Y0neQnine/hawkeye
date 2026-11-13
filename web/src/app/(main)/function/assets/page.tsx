@@ -547,7 +547,7 @@ export default function AssetsPage() {
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "IP", "C段", "绑定域名", "开放端口", ""]}
+            cols={["", "IP", "C段", "标签", "绑定域名", "开放端口", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -565,6 +565,9 @@ export default function AssetsPage() {
                 </TableCell>
                 <TableCell className="font-mono text-xs font-medium">{a.ip}</TableCell>
                 <TableCell className="font-mono text-xs">{a.c_segment || "—"}</TableCell>
+                <TableCell>
+                  <Chips items={a.technologies ?? []} />
+                </TableCell>
                 <TableCell>
                   <Chips items={a.bound_domains ?? []} mono />
                 </TableCell>

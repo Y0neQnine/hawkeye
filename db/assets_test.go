@@ -150,6 +150,206 @@ func TestUpsertIPBoundDomains(t *testing.T) {
 	}
 }
 
+// IP assets carry the same technologies column as services; tags mark CDN/WAF
+// egress and must union-merge across upserts instead of replacing each other.
+func TestUpsertIPTags(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	id, err := av2.UpsertIP(UpsertIPReq{
+		IP:           "192.0.2.53",
+		Technologies: []string{"CDN", "saaswaf"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+
+	id2, err := av2.UpsertIP(UpsertIPReq{
+		IP:           "192.0.2.53",
+		Technologies: []string{"WAF", "saaswaf"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id {
+		t.Errorf("dedup failed: %d != %d", id2, id)
+	}
+
+	var tagsJSON string
+	if err := d.QueryRow(`SELECT array_to_json(technologies)::text FROM assets WHERE id = $1`, id).Scan(&tagsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tagsJSON, `"CDN"`) || !strings.Contains(tagsJSON, `"WAF"`) || !strings.Contains(tagsJSON, `"saaswaf"`) {
+		t.Fatalf("technologies merge: missing tag in %s", tagsJSON)
+	}
+	if n := strings.Count(tagsJSON, `"`); n != 6 {
+		t.Fatalf("technologies merge: want 3 distinct tags, got %s", tagsJSON)
+	}
+
+	// An upsert without tags must not clear existing ones.
+	if _, err := av2.UpsertIP(UpsertIPReq{IP: "192.0.2.53"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	d.QueryRow(`SELECT cardinality(technologies) FROM assets WHERE id = $1`, id).Scan(&n)
+	if n != 3 {
+		t.Errorf("technologies cleared by tagless upsert: got %d tags", n)
+	}
+}
+
+// An IP serving a company-scoped domain belongs to that company even when the
+// company scope has no IP/CIDR rule. Insert-time resolution and scope recompute
+// must agree, or the IP tab of the company stays empty after a reattribution.
+func TestIPAttributionFromBoundDomains(t *testing.T) {
+	d, av2, cs := testSetup(t)
+	defer d.Close()
+
+	suffix := fmt.Sprintf("ipbind-%d.test", time.Now().UnixNano())
+	domain := "example." + suffix
+	companyID, _, err := cs.UpsertCompany("iptest-"+suffix, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM companies WHERE id = $1`, companyID)
+	if _, _, invalid, errs := cs.AddScopeInputs(companyID, []ScopeInput{{Kind: "domain", Value: domain}}, "test"); invalid > 0 || len(errs) > 0 {
+		t.Fatalf("add scope: invalid=%d errs=%v", invalid, errs)
+	}
+
+	lastOctet := time.Now().UnixNano()%200 + 1
+	ip := fmt.Sprintf("198.18.0.%d", lastOctet)
+	boundIP, err := av2.UpsertIP(UpsertIPReq{
+		IP:           ip,
+		BoundDomains: []string{"WWW.Example." + suffix + "."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, boundIP)
+	var cid *int64
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, boundIP).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid == nil || *cid != companyID {
+		t.Fatalf("insert-time attribution: want company %d, got %v", companyID, cid)
+	}
+
+	// The recompute path must derive the same ownership for an IP whose bound
+	// domain was attached after the row was created.
+	recomputedIP, err := av2.UpsertIP(UpsertIPReq{IP: fmt.Sprintf("198.18.0.%d", lastOctet+1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, recomputedIP)
+	if _, err := d.Exec(`UPDATE assets SET bound_domains = ARRAY[$1] WHERE id = $2`, "api."+domain, recomputedIP); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.RecomputeAttribution(); err != nil {
+		t.Fatal(err)
+	}
+	cid = nil
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, recomputedIP).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid == nil || *cid != companyID {
+		t.Fatalf("recompute attribution: want company %d, got %v", companyID, cid)
+	}
+
+	// A bound domain outside every scope rule must not invent ownership.
+	unownedIP, err := av2.UpsertIP(UpsertIPReq{
+		IP:           fmt.Sprintf("198.18.0.%d", lastOctet+2),
+		BoundDomains: []string{"unrelated.example.net"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, unownedIP)
+	cid = nil
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, unownedIP).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid != nil {
+		t.Fatalf("unrelated bound domain must stay unowned, got company %d", *cid)
+	}
+}
+
+// Addresses collected in a task opened for one company belong to that company
+// even when no scope rule (bound domain / IP-CIDR / ICP) matches. Insert-time
+// resolution and recompute must agree so the company IP tab keeps them.
+func TestIPAttributionFromTaskCompany(t *testing.T) {
+	d, av2, cs := testSetup(t)
+	defer d.Close()
+
+	suffix := fmt.Sprintf("iptask-%d.test", time.Now().UnixNano())
+	companyID, _, err := cs.UpsertCompany("iptask-"+suffix, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM companies WHERE id = $1`, companyID)
+
+	task, err := d.CreateTaskWithOptions("iptask "+suffix, "collect shared ip", TaskCreateOptions{
+		CompanyIDs: []int64{companyID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+
+	lastOctet := time.Now().UnixNano()%150 + 20
+	ip := fmt.Sprintf("198.18.1.%d", lastOctet)
+	id, err := av2.UpsertIP(UpsertIPReq{IP: ip, TaskID: task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+
+	var cid *int64
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, id).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid == nil || *cid != companyID {
+		t.Fatalf("insert-time task attribution: want company %d, got %v", companyID, cid)
+	}
+
+	if err := cs.RecomputeAttribution(); err != nil {
+		t.Fatal(err)
+	}
+	cid = nil
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, id).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid == nil || *cid != companyID {
+		t.Fatalf("recompute task attribution: want company %d, got %v", companyID, cid)
+	}
+
+	// A task spanning several companies is ambiguous: the same address must stay
+	// unowned instead of being assigned to whichever company comes first.
+	companyB, _, err := cs.UpsertCompany("iptask-b-"+suffix, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM companies WHERE id = $1`, companyB)
+	multi, err := d.CreateTaskWithOptions("iptask multi "+suffix, "ambiguous company", TaskCreateOptions{
+		CompanyIDs: []int64{companyID, companyB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(multi.ID)
+	ambiguousID, err := av2.UpsertIP(UpsertIPReq{IP: fmt.Sprintf("198.18.1.%d", lastOctet+1), TaskID: multi.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, ambiguousID)
+	cid = nil
+	if err := d.QueryRow(`SELECT company_id FROM assets WHERE id = $1`, ambiguousID).Scan(&cid); err != nil {
+		t.Fatal(err)
+	}
+	if cid != nil {
+		t.Fatalf("multi-company task must stay unowned, got company %d", *cid)
+	}
+}
+
 func TestAppendIPPort(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
@@ -943,7 +1143,7 @@ func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 		t.Fatalf("task pagination order=%v want=%v", got, want)
 	}
 	if got := collect(func(limit, offset int) ([]*Asset, error) {
-		return assets.QueryDSL(marker, "root_domain", 0, limit, offset)
+		return assets.QueryDSL(marker, "root_domain", 0, 0, limit, offset)
 	}); !slices.Equal(got, want) {
 		t.Fatalf("DSL pagination order=%v want=%v", got, want)
 	}
@@ -1025,11 +1225,11 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 	}
 
 	stamp := time.Now().UnixNano()
-	root := fmt.Sprintf("sc%d.invalid", stamp)           // in-scope root domain (task)
-	srcRoot := fmt.Sprintf("src%d.invalid", stamp)       // in-scope via source task
-	out := fmt.Sprintf("out%d.invalid", stamp)           // out of every scope
-	marker := fmt.Sprintf("mk%d", stamp)                 // bare-text token present in all rows
-	foreignTask := stamp + 777                           // asset produced by an unrelated task
+	root := fmt.Sprintf("sc%d.invalid", stamp)     // in-scope root domain (task)
+	srcRoot := fmt.Sprintf("src%d.invalid", stamp) // in-scope via source task
+	out := fmt.Sprintf("out%d.invalid", stamp)     // out of every scope
+	marker := fmt.Sprintf("mk%d", stamp)           // bare-text token present in all rows
+	foreignTask := stamp + 777                     // asset produced by an unrelated task
 
 	// Scope: task owns root; source task owns srcRoot; task owns an IP /24.
 	for _, sc := range []struct {
@@ -1057,7 +1257,7 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 		{"subdomain", "api." + root, root, "", "", "", marker},                        // under task root
 		{"service", "www." + root, root, "https://www." + root + "/", "", "", marker}, // service under task root
 		{"endpoint", "www." + root, root, "https://www." + root + "/a?" + marker + "=1", "GET", "", ""},
-		{"subdomain", "dev." + srcRoot, srcRoot, "", "", "", marker}, // under source-task root
+		{"subdomain", "dev." + srcRoot, srcRoot, "", "", "", marker},                                      // under source-task root
 		{"endpoint", "198.51.100.9", "198.51.100.9", "http://198.51.100.9:8080/" + marker, "GET", "", ""}, // IP-literal host, ip col empty
 		{"subdomain", "x." + out, out, "", "", "", marker},                                                // out of scope
 	}

@@ -93,6 +93,9 @@ add_company_scope(company="某某科技有限公司",
 ```
 
 - `scope` 一行一条：根域、URL、IP、CIDR、ICP、关键词；系统自动认领命中资产。
+- IP 归属优先看绑定的域名：IP 与主机名类资产按 `company_scope` 的域名自动归入企业，**IP 本身用 `insert_assets` 的 `bound_domains` 关联到该域名**才会继承归属（仅当范围里有 IP/CIDR 时才直接按网段归属）。登记 IP 时把已验证解析到它的目标域名写进 `bound_domains`，共享 CDN 也照写，其他绑定域名不会因此进入目标范围。
+- 在**企业任务**中采集到的 IP，若该任务只关联一个企业，即使没有 `bound_domains`、也没命中企业 IP/CIDR/ICP 范围，也归入该任务企业；这是最弱一档证据，域名与 IP/CIDR/ICP 规则优先，多企业任务的 IP 仍保持未归属。
+- CDN/WAF 识别只写进 IP 的 `technologies` 标签（如 `["CDN","WAF","saaswaf"]`），用来标明共享边缘角色；**标签不参与归属**——共享 CDN IP 是否属于目标企业，仍然只看 `bound_domains` 命中的域名范围。
 - 拒绝裸 TLD 与过宽网段（IPv4 仅 `/16`–`/32`），非法行会在 `errors` 返回。
 - 应用资产：`insert_assets` 时传 `{"type":"app","app_name":"...","app_icp":"...","company_id":<id>}`，`company_id` 取自 `add_company_scope` 返回或 `list_companies`。
 - 第三方平台关联：`insert_assets` 传 `{"type":"third_party","app_name":"粤省事","category":"政务平台","url":"<平台入口>","evidence_url":"<目标侧引用页面>","company_id":<id>}`；两个 URL 缺一不可。

@@ -525,11 +525,14 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["IP", "C段", "绑定域名", "开放端口", "来源", "操作"]} {...commonCardProps}>
+          <AssetCard cols={["IP", "C段", "标签", "绑定域名", "开放端口", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
                 <TableCell className="font-medium font-mono text-xs">{asset.ip}</TableCell>
                 <TableCell className="font-mono text-xs">{asset.c_segment || "—"}</TableCell>
+                <TableCell>
+                  <Chips items={asset.technologies ?? []} />
+                </TableCell>
                 <TableCell>
                   <Chips items={asset.bound_domains ?? []} mono />
                 </TableCell>

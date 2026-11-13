@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestFaviconMMH3(t *testing.T) {
@@ -107,6 +109,47 @@ func TestProbe(t *testing.T) {
 		if !containsString(obs.Technologies, want) {
 			t.Fatalf("technologies %v missing %q", obs.Technologies, want)
 		}
+	}
+}
+
+func TestProbeRateLimitBackoff(t *testing.T) {
+	cases := []struct {
+		code     int
+		wantIcon bool
+	}{
+		{http.StatusForbidden, true}, // path-level denial: still worth one icon GET
+		{http.StatusTooManyRequests, false},
+	}
+	for _, c := range cases {
+		t.Run(http.StatusText(c.code), func(t *testing.T) {
+			var iconHits int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(c.code)
+				w.Write([]byte(`<html><head><title>denied</title><link rel="icon" href="/favicon.ico"></head></html>`))
+			})
+			mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&iconHits, 1)
+				w.Write([]byte("hello"))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			obs, err := Probe(context.Background(), srv.Client(), srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if obs.StatusCode != c.code {
+				t.Fatalf("status = %d, want %d", obs.StatusCode, c.code)
+			}
+			if got := atomic.LoadInt32(&iconHits) > 0; got != c.wantIcon {
+				t.Fatalf("favicon fetched = %v, want %v", got, c.wantIcon)
+			}
+			if obs.RetryAfter != 120*time.Second {
+				t.Fatalf("RetryAfter = %s, want 2m", obs.RetryAfter)
+			}
+		})
 	}
 }
 

@@ -528,7 +528,7 @@ func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, prob
 		case "root_domain":
 			id, err = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: a.Domain, ICP: a.ICP, TaskID: taskID})
 		case "ip":
-			id, err = as.UpsertIP(db.UpsertIPReq{IP: a.IP, BoundDomains: a.BoundDomains, OpenPorts: a.OpenPorts, TaskID: taskID})
+			id, err = as.UpsertIP(db.UpsertIPReq{IP: a.IP, BoundDomains: a.BoundDomains, OpenPorts: a.OpenPorts, Technologies: a.Technologies, TaskID: taskID})
 		case "subdomain":
 			id, err = as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: a.Domain, RecordType: a.RecordType, RecordValue: a.RecordValue, ICP: a.ICP, TaskID: taskID})
 		case "app":

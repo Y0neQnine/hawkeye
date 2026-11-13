@@ -158,6 +158,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_sv2_value ON company_scope(company_id, kind
 CREATE INDEX IF NOT EXISTS idx_sv2_icp ON company_scope(value) WHERE kind = 'icp';
 CREATE INDEX IF NOT EXISTS idx_sv2_company ON company_scope(company_id);
 
+-- Backfill/fix-up ownership for IP assets that are bound to a domain scoped to a
+-- company. IP assets carry no root_domain, so before this rule an address that
+-- only appeared as a site's A/AAAA target stayed company-less even though every
+-- other asset of that site was attributed. Idempotent: only fills NULL scope rows,
+-- never touches explicit ownership or rows already attributed by IP/CIDR.
+UPDATE assets a
+SET company_id = matched.company_id, company_source = 'scope'
+FROM (
+    SELECT DISTINCT ON (a.id) a.id AS asset_id, cs.company_id
+    FROM assets a
+    JOIN company_scope cs ON cs.kind = 'domain'
+      AND EXISTS (
+          SELECT 1 FROM unnest(a.bound_domains) AS d(domain)
+          WHERE d.domain = cs.domain
+             OR right(d.domain, length(cs.domain) + 1) = '.' || cs.domain
+      )
+    WHERE a.company_id IS NULL
+      AND a.company_source = 'scope'
+      AND a.type = 'ip'
+      AND cardinality(a.bound_domains) > 0
+    ORDER BY a.id, length(cs.domain) DESC, cs.company_id
+) AS matched
+WHERE a.id = matched.asset_id;
+
 -- =====================================================================
 -- B. 推理探索层
 -- =====================================================================
@@ -777,6 +801,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
+
+-- Backfill ownership for addresses collected under a task opened for exactly one
+-- company: they belong to that company even when no scope rule (bound domain /
+-- IP-CIDR / ICP) matched. Tasks spanning several companies are ambiguous and stay
+-- unowned. Idempotent: only fills NULL scope-derived rows on each startup.
+UPDATE assets a
+SET company_id = matched.company_id, company_source = 'scope'
+FROM (
+    SELECT a.id AS asset_id, min(ts.company_id) AS company_id,
+           count(DISTINCT ts.company_id) AS n
+    FROM assets a
+    JOIN task_scope ts ON ts.kind = 'company' AND ts.company_id IS NOT NULL
+      AND ts.task_id = ANY(a.task_ids)
+    WHERE a.company_id IS NULL
+      AND a.company_source = 'scope'
+      AND a.type = 'ip'
+    GROUP BY a.id
+) AS matched
+WHERE a.id = matched.asset_id AND matched.n = 1;
 
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录

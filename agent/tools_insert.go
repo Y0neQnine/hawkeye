@@ -132,6 +132,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method；third_party→url+evidence_url+company_id。其余字段含义见各自说明。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"service(HTTP) 只要给 url 即可：系统会自动只读探测首页并识别系统/技术栈（status_code/content_length/page_title/technologies/favicon_mmh3），随后可用 list_assets 回读，无需重复手工抓取。\n"+
+			"ip 类型照常登记解析/探测到的地址：识别为 CDN/WAF 的共享出口也要登记，并在 technologies 打 CDN/WAF/厂商标签，同时用 bound_domains 记录它是哪些目标域名的解析结果；非目标企业的 IP 不要为此扩大 company_scope。\n"+
 			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。只登记目标主体自己发布/运营的应用（开发者/认证主体/备案主体一致）；第三方平台不登记为 app。\n"+
 			"third_party 用于目标业务涉及的第三方平台（政务平台、预约挂号平台、支付/办理入口等）：url 填平台自身的入口地址，evidence_url 填目标侧引用该平台的具体页面（官网指引、公告、办事说明等），两个 URL 都必须提供且指向不同位置；缺 evidence_url 会被拒绝。company_id 填涉及该平台的目标企业。third_party 表示'目标与该平台有关联'，不代表平台属于目标，也不会进入目标的域名/IP 范围。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
@@ -160,7 +161,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					"bound_domains": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "该 IP 绑定的域名列表（ip 类型可选）",
+						"description": "该 IP 绑定的域名列表（ip 类型建议必填）：填已验证解析到该 IP 的目标域名，系统据此把 IP 归入域名所属企业；共享 CDN 也照填，归属只按域名范围继承。未填时，若采集该 IP 的任务只关联一个企业，IP 仍会归入该任务企业",
 					},
 					"open_ports": map[string]any{
 						"type":        "array",
@@ -190,7 +191,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					"technologies": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "指纹/技术栈列表，如 [\"Nginx\",\"Vue\",\"Bootstrap\"]（可选）",
+						"description": "标签列表（可选）。service 填指纹/技术栈，如 [\"Nginx\",\"Vue\",\"Bootstrap\"]；ip 填网络角色与归属，如 CDN / WAF / 云厂商 / 省级政务云，例如 [\"CDN\",\"WAF\",\"saaswaf\"]。CDN/WAF 证据：CNAME 指向 *.cdn/*.waf 等加速域、证书签发者、同 IP 承载大量无关域名、可识别的厂商节点",
 					},
 					"auth": map[string]any{
 						"type":        "array",
@@ -276,6 +277,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						IP:           item.IP,
 						BoundDomains: item.BoundDomains,
 						OpenPorts:    item.OpenPorts,
+						Technologies: item.Technologies,
 						TaskID:       taskID,
 					})
 

@@ -133,6 +133,102 @@ func (s *AssetStore) resolveCompanyWithICP(rootDomain, ipStr, icp string) (*int6
 	return s.company.ResolveCompanyWithICP(rootDomain, ipStr, icp)
 }
 
+// normalizeIPBoundDomains lowercases, de-duplicates and drops non-hostname
+// entries so bound-domain scope matching sees stable values regardless of how
+// the agent spelled the host.
+func normalizeIPBoundDomains(domains []string) []string {
+	out := make([]string, 0, len(domains))
+	seen := make(map[string]struct{}, len(domains))
+	for _, d := range domains {
+		d = DomainKey(d)
+		if d == "" || net.ParseIP(d) != nil {
+			continue
+		}
+		if _, dup := seen[d]; dup {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
+}
+
+// resolveIPCompany attributes an address by the domains bound to it first, then
+// IP/CIDR scope, then the company the collecting task was opened for. Companies
+// are usually scoped by domain only, so without the bound-domain rule an address
+// serving the company's site (its A/AAAA target) would never carry company_id;
+// domain precedence matches attribution for the other asset types. The longest
+// matching scope domain wins, then the smallest company id, keeping the choice
+// deterministic. Task-company is the weakest signal: an address collected in a
+// company task still belongs to that company when no scope rule claimed it.
+func (s *AssetStore) resolveIPCompany(ipStr string, boundDomains []string, taskID int64) (*int64, error) {
+	if len(boundDomains) > 0 {
+		var q companyScopeQueryer = s.db
+		if s.tx != nil {
+			q = s.tx
+		}
+		cid, err := resolveCompanyByBoundDomains(q, boundDomains)
+		if err != nil {
+			return nil, err
+		}
+		if cid != nil {
+			return cid, nil
+		}
+	}
+	cid, err := s.resolveCompanyWithICP("", ipStr, "")
+	if err != nil || cid != nil {
+		return cid, err
+	}
+	return s.resolveCompanyByTaskScope(taskID)
+}
+
+// resolveCompanyByTaskScope returns the company a task was opened for. Tasks
+// carrying several company scopes are ambiguous and stay unattributed.
+func (s *AssetStore) resolveCompanyByTaskScope(taskID int64) (*int64, error) {
+	if taskID <= 0 {
+		return nil, nil
+	}
+	var q companyScopeQueryer = s.db
+	if s.tx != nil {
+		q = s.tx
+	}
+	var n int
+	var cid int64
+	err := q.QueryRow(`
+SELECT count(DISTINCT company_id), COALESCE(min(company_id), 0)
+FROM task_scope
+WHERE task_id = $1 AND kind = 'company' AND company_id IS NOT NULL`, taskID).Scan(&n, &cid)
+	if err != nil {
+		return nil, err
+	}
+	if n != 1 {
+		return nil, nil
+	}
+	return &cid, nil
+}
+
+func resolveCompanyByBoundDomains(q companyScopeQueryer, boundDomains []string) (*int64, error) {
+	var cid int64
+	err := q.QueryRow(`
+SELECT cs.company_id
+FROM company_scope cs
+WHERE cs.kind = 'domain'
+  AND EXISTS (
+      SELECT 1 FROM unnest($1::text[]) AS d(domain)
+      WHERE d.domain = cs.domain
+         OR right(d.domain, length(cs.domain) + 1) = '.' || cs.domain
+  )
+ORDER BY length(cs.domain) DESC, cs.company_id
+LIMIT 1`, marshalStringArray(boundDomains)).Scan(&cid)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cid, nil
+}
+
 // =====================================================================
 // Helpers
 // =====================================================================
@@ -333,6 +429,9 @@ type UpsertIPReq struct {
 	IP           string
 	BoundDomains []string
 	OpenPorts    []PortService
+	// Technologies tags the address's network role and provider, e.g. CDN /
+	// WAF / 腾讯云 CDN. The same column is the stack list for service assets.
+	Technologies []string
 	TaskID       int64
 }
 
@@ -349,8 +448,9 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 			return scoped.UpsertIP(req)
 		})
 	}
+	boundDomainsList := normalizeIPBoundDomains(req.BoundDomains)
 	cseg := calcCSegment(req.IP)
-	companyID, err := s.resolveCompanyWithICP("", req.IP, "")
+	companyID, err := s.resolveIPCompany(req.IP, boundDomainsList, req.TaskID)
 	if err != nil {
 		return 0, err
 	}
@@ -362,11 +462,12 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 		taskIDs = "{}"
 	}
 
-	boundDomains := marshalStringArray(req.BoundDomains)
+	boundDomains := marshalStringArray(boundDomainsList)
 	openPortsJSON, err := marshalPortServices(req.OpenPorts)
 	if err != nil {
 		return 0, err
 	}
+	techsArr := marshalStringArray(req.Technologies)
 
 	var csegVal any
 	if cseg != "" {
@@ -375,8 +476,8 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(type, ip, c_segment, bound_domains, open_ports, company_id, company_source, task_ids)
-VALUES ('ip', $1, $2::cidr, $3::text[], $4::jsonb[], $5, 'scope', $6::bigint[])
+INSERT INTO assets(type, ip, c_segment, bound_domains, open_ports, technologies, company_id, company_source, task_ids)
+VALUES ('ip', $1, $2::cidr, $3::text[], $4::jsonb[], $5::text[], $6, 'scope', $7::bigint[])
 ON CONFLICT (ip) WHERE type = 'ip' DO UPDATE SET
     bound_domains = (SELECT ARRAY(SELECT DISTINCT unnest(assets.bound_domains || EXCLUDED.bound_domains))),
     open_ports    = (
@@ -387,6 +488,10 @@ ON CONFLICT (ip) WHERE type = 'ip' DO UPDATE SET
                      CASE WHEN elem->>'service' IS NOT NULL AND elem->>'service' <> '' THEN 0 ELSE 1 END
         )
     ),
+    technologies = CASE
+        WHEN COALESCE(cardinality(EXCLUDED.technologies), 0) = 0 THEN assets.technologies
+        ELSE (SELECT ARRAY(SELECT DISTINCT unnest(assets.technologies || EXCLUDED.technologies)))
+    END,
     c_segment  = COALESCE(assets.c_segment, EXCLUDED.c_segment),
     company_id = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
@@ -399,7 +504,7 @@ ON CONFLICT (ip) WHERE type = 'ip' DO UPDATE SET
     END,
     task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     last_seen  = now()
-RETURNING id`, req.IP, csegVal, boundDomains, openPortsJSON, companyID, taskIDs).Scan(&id)
+RETURNING id`, req.IP, csegVal, boundDomains, openPortsJSON, techsArr, companyID, taskIDs).Scan(&id)
 	return id, err
 }
 
@@ -1160,7 +1265,11 @@ RETURNING id`,
 	// root_domain + subdomain(+IP) so those asset types get populated too.
 	s.linkHostAssets(domain, rootDomain, req.TaskID)
 	if req.IP != "" {
-		_, _ = s.UpsertIP(UpsertIPReq{IP: req.IP, TaskID: req.TaskID})
+		var boundDomains []string
+		if domain != "" {
+			boundDomains = []string{domain}
+		}
+		_, _ = s.UpsertIP(UpsertIPReq{IP: req.IP, BoundDomains: boundDomains, TaskID: req.TaskID})
 	}
 	return id, nil
 }

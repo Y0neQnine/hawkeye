@@ -46,12 +46,32 @@ type Engine struct {
 	cool   sync.Map // dedup/cooldown: "kind:id" -> time.Time (last run)
 	once   sync.Once
 	closed chan struct{}
+
+	// Per-host pacing keeps a batch of URLs on one site from arriving as a burst
+	// that looks like scanning. WAF/CDN edges commonly rate-limit by IP when that
+	// happens; probes are serialized per host and a host that explicitly asks for
+	// backoff (429, or 503 with Retry-After) is parked.
+	hostMu      sync.Mutex
+	hostLocks   map[string]*sync.Mutex
+	hostLast    map[string]time.Time
+	hostBlocked sync.Map // host -> time.Time (unblock time)
 }
 
 const (
 	cooldown    = 5 * time.Minute
 	httpTimeout = 12 * time.Second
 	queueSize   = 1024
+
+	// hostProbeInterval is the minimum gap between HTTP probes to the same host.
+	hostProbeInterval = 3 * time.Second
+	// backoffCooldown is the minimum park after a host explicitly asks us to back
+	// off. 403 does not park: it is usually a path-level denial (auth, directory
+	// listing) rather than an IP block, and parking would silently skip sites that
+	// only protect some paths.
+	backoffCooldown = 30 * time.Minute
+	// maxBackoffCooldown caps Retry-After so one bogus header cannot park a host
+	// indefinitely.
+	maxBackoffCooldown = 6 * time.Hour
 )
 
 // New builds the engine. proxy() returns the recording-proxy address to route HTTP
@@ -73,11 +93,12 @@ func New(as *db.AssetStore, proxy func() string, workers int) *Engine {
 		resolv = nil
 	}
 	e := &Engine{
-		as:     as,
-		resolv: resolv,
-		client: buildClient(proxy),
-		jobs:   make(chan job, queueSize),
-		closed: make(chan struct{}),
+		as:       as,
+		resolv:   resolv,
+		client:   buildClient(proxy),
+		jobs:     make(chan job, queueSize),
+		closed:   make(chan struct{}),
+		hostLast: make(map[string]time.Time),
 	}
 	for i := 0; i < workers; i++ {
 		go e.worker()
@@ -179,6 +200,89 @@ func (e *Engine) onCooldown(j job) bool {
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
+// hostLock returns the per-host serialization mutex, creating it on demand.
+func (e *Engine) hostLock(host string) *sync.Mutex {
+	e.hostMu.Lock()
+	defer e.hostMu.Unlock()
+	if e.hostLocks == nil {
+		e.hostLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := e.hostLocks[host]
+	if !ok {
+		m = &sync.Mutex{}
+		e.hostLocks[host] = m
+	}
+	return m
+}
+
+func (e *Engine) hostBlockedNow(host string) bool {
+	v, ok := e.hostBlocked.Load(host)
+	if !ok {
+		return false
+	}
+	until, _ := v.(time.Time)
+	return time.Now().Before(until)
+}
+
+func (e *Engine) markHostBlocked(host string, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	e.hostBlocked.Store(host, time.Now().Add(d))
+}
+
+// backoffPark reports whether a response asks the client to stop, and for how
+// long. Only explicit signals count: 429 is a rate limit, and 503 parks only when
+// the server also sent Retry-After (overload with a stated recovery time). A bare
+// 403 is a path-level denial and a bare 503 is usually maintenance/upstream
+// failure — both are recorded, neither parks the host.
+func backoffPark(code int, retryAfter time.Duration) (time.Duration, bool) {
+	switch {
+	case code == http.StatusTooManyRequests:
+	case code == http.StatusServiceUnavailable && retryAfter > 0:
+	default:
+		return 0, false
+	}
+	d := backoffCooldown
+	if retryAfter > d {
+		d = retryAfter
+	}
+	if d > maxBackoffCooldown {
+		d = maxBackoffCooldown
+	}
+	return d, true
+}
+
+// paceHost serializes probes to one host and enforces hostProbeInterval so a
+// batch of URLs on the same site does not arrive as a scan-like burst.
+func (e *Engine) paceHost(host string) bool {
+	if e.hostBlockedNow(host) {
+		return false
+	}
+	mu := e.hostLock(host)
+	mu.Lock()
+	defer mu.Unlock()
+	if e.hostBlockedNow(host) {
+		return false
+	}
+	e.hostMu.Lock()
+	last := e.hostLast[host]
+	e.hostMu.Unlock()
+	if !last.IsZero() {
+		if wait := hostProbeInterval - time.Since(last); wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-e.closed:
+				return false
+			}
+		}
+	}
+	e.hostMu.Lock()
+	e.hostLast[host] = time.Now()
+	e.hostMu.Unlock()
+	return true
+}
+
 // ---- DNS ----
 
 func (e *Engine) doDNS(id int64, host string) {
@@ -190,11 +294,15 @@ func (e *Engine) doDNS(id int64, host string) {
 		return
 	}
 	ips := uniq(append(append([]string{}, data.A...), data.AAAA...))
+	// CNAME 指向 CDN/WAF 厂商域名时，解析结果属于共享边缘节点：登记 IP 并打标签，
+	// 便于在资产里区分"目标自有主机"与"CDN/WAF 出口"，标签不参与企业归属。
+	tags := detectNetworkTags(data.CNAME)
 	// Upsert resolved IPs into the asset store.
 	for _, ip := range ips {
 		_, _ = e.as.UpsertIP(db.UpsertIPReq{
 			IP:           ip,
 			BoundDomains: []string{host},
+			Technologies: tags,
 		})
 	}
 	// Record A records as subdomains if host looks like a subdomain.
@@ -227,7 +335,11 @@ func (e *Engine) doDNS(id int64, host string) {
 // technologies/favicon hash. This is what makes "采集到站点即识别指纹" automatic:
 // every inserted service URL is enriched without the agent having to re-probe it.
 func (e *Engine) doHTTP(id int64, rawURL string) {
-	if hostOf(rawURL) == "" {
+	host := hostOf(rawURL)
+	if host == "" {
+		return
+	}
+	if !e.paceHost(host) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*httpTimeout)
@@ -235,6 +347,10 @@ func (e *Engine) doHTTP(id int64, rawURL string) {
 	obs, err := fingerprint.Probe(ctx, e.client, rawURL)
 	if err != nil {
 		return
+	}
+	if d, ok := backoffPark(obs.StatusCode, obs.RetryAfter); ok {
+		e.markHostBlocked(host, d)
+		log.Printf("[enrich] %s 返回 %d，按退避暂停自动探测该主机 %s", rawURL, obs.StatusCode, d)
 	}
 	statusCode := obs.StatusCode
 	bodyLen := obs.ContentLength

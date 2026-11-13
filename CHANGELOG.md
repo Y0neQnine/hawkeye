@@ -2,6 +2,19 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.1] - 2026-11-13
+
+### 新增
+
+- **IP 资产 CDN/WAF 标签**：IP 资产的 `technologies` 用于记录网络角色与厂商（如 `["CDN","WAF","saaswaf"]`），资产页与任务资产页的 IP 列表新增「标签」列；`insert_assets`、资产 API 与 CSV 导入均可写入，重复登记按并集合并、不清空已有标签。DNS 富化解析到厂商加速/防护域（saaswaf、cloudflare、阿里云/腾讯云 CDN、网宿、Akamai、CloudFront 等 CNAME 指纹）时自动给解析 IP 打标。标签只描述共享边缘角色，不参与企业归属；不属于目标企业的共享 IP 保留为全局资产，不扩大企业范围。`ip-port-mapping`、`company-attribution` Skill 与 `insert_assets` 说明同步补充判定依据和标签格式。
+- **端口探测三档预设**：`ip-port-mapping` Skill 的主动探测改为三档可选——常见端口（Top 100/1000）、危险/敏感端口（远程管理、数据库、缓存、容器编排等固定清单）、全端口（1–65535，仅限单个 IP 且明确授权），并提供 nmap/naabu 对应命令与无工具兜底；统一单主机串行、速率 ≤50 pps，要求把档位、工具与速率写入事实。
+
+### 修复
+
+- **修复企业资产页 IP 页签为空**：IP 资产没有 `root_domain`，此前归属只按企业范围里的 IP/CIDR 规则计算，企业范围只写域名时，域名解析到的 IP 永远不会带上 `company_id`。现在登记 IP（以及 subdomain/service/endpoint 的 IP 副作用）会按 `bound_domains` 匹配企业域名范围并继承归属，域名规则优先于 IP/CIDR；归属重算与启动时的存量回填使用同一规则，已有 IP 在升级后自动补入对应企业。`insert_assets` 的 `bound_domains` 说明与 `ip-port-mapping`、`company-attribution` Skill 同步要求登记解析到该 IP 的目标域名（共享 CDN 也照填，归属只继承域名范围）。
+- **任务内采集的 IP 归入任务企业**：在只关联一个企业的任务中采集到的 IP（含共享 CDN/WAF 出口），即使没有 `bound_domains`、也未命中企业 IP/CIDR/ICP 范围，也归入该任务企业；域名与 IP/CIDR/ICP 规则仍优先，多企业任务的 IP 保持未归属。登记与归属重算使用同一规则，存量 IP 在升级启动时自动回填。
+- **降低采集触发 WAF 封禁**：自动指纹探测改为同一主机串行、间隔 ≥3 秒；仅 `429`、或带 `Retry-After` 的 `503` 才暂停该主机自动探测（默认 30 分钟，服务器要求的退避更长时按服务器，最长 6 小时），`403` 与不带 `Retry-After` 的 `503` 只记录不暂停；favicon 只在 `429` 时跳过。`web-fingerprint`、`ip-port-mapping` Skill 补充各状态码含义、被动优先、每站最小请求、出口 IP/UA 报备白名单等操作规范。
+
 ## [0.3.0] - 2026-11-13
 
 ### 新增
