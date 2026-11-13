@@ -126,7 +126,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"service(HTTP) 只要给 url 即可：系统会自动只读探测首页并识别系统/技术栈（status_code/content_length/page_title/technologies/favicon_mmh3），随后可用 list_assets 回读，无需重复手工抓取。\n"+
-			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。\n"+
+			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。只登记目标主体自己发布/运营的应用（开发者/认证主体/备案主体一致）；第三方平台仅作为办理入口被提到时不登记。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
@@ -169,7 +169,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					"category":    str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序（可选，建议填）"),
 					"description": str("描述：开发者/认证主体 + 下载或入口 URL（可选）"),
 					"app_icp":     str("应用 ICP 备案（可选）"),
-					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）"),
+					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）。仅当应用确属该企业（商店开发者/认证主体/备案主体一致，或官方声明自有）时才填；仅作为第三方办理入口被提到的不登记、不填"),
 					// service (http)
 					"url":         str("完整 URL，含协议和端口（HTTP 服务必填；service_type 自动设为 http）"),
 					"status_code": intp("HTTP 响应状态码，如 200/301/403/404（可选）"),

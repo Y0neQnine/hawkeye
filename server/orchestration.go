@@ -452,11 +452,12 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedWorkerReadToolsUnbind() // list_facts/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
 	s.unbindGoalMetDefault()
-	s.reseedGoalsPrompt()     // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
-	s.reseedMainAgentPrompt() // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
-	s.reseedPlannerPrompt()   // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
-	s.reseedWorkerPrompt()    // worker 提示词:加否定结论证据门槛(一次性)
-	s.reseedBrandPrompts()    // Hawkeye 改造:内置提示词统一为采集导向(一次性)
+	s.reseedGoalsPrompt()         // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
+	s.reseedMainAgentPrompt()     // mainagent 提示词加入「目标达成后 add_intent 反问是否建目标」(一次性)
+	s.reseedPlannerPrompt()       // planner 提示词:重写「0 意图」正当理由 + 加量化验收核对(一次性)
+	s.reseedWorkerPrompt()        // worker 提示词:加否定结论证据门槛(一次性)
+	s.reseedBrandPrompts()        // Hawkeye 改造:内置提示词统一为采集导向(一次性)
+	s.reseedAppOwnershipPrompts() // app 归属:第三方办理入口不登记为目标资产(一次性)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/list_companies 连同 pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
@@ -467,7 +468,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v7_list_facts_paging"
+	const flag = "tool_schema_refresh_v8_app_ownership"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -665,6 +666,37 @@ func (s *Server) reseedBrandPrompts() {
 		}
 	}
 	log.Printf("[prompts] 内置提示词已按 Hawkeye 采集导向重刷(一次性)")
+}
+
+// reseedAppOwnershipPrompts 把涉及移动端/微信生态采集的提示词刷成【当前代码默认】——
+// 新增「只登记目标主体自己发布/运营的 App、公众号、小程序；第三方平台仅作为办理入口被
+// 提及时不算归属」。版本管理【追加新版本】并切过去，旧版本仍保留在历史里可找回。
+// settings flag 守卫 → 只做一次。全新库无需处理(SeedPromptIfEmpty 已 seed 最新默认)。
+func (s *Server) reseedAppOwnershipPrompts() {
+	const flag = "hawkeye_prompt_app_ownership_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	seeds := agent.BuiltinPromptSeeds()
+	for _, key := range []string{"planner", "worker", "pentest"} {
+		tmpl := seeds[key]
+		if tmpl == "" {
+			continue
+		}
+		a, err := s.m.pg.GetAgentByKey(key)
+		if err != nil || a == nil {
+			continue
+		}
+		if cur, err := s.m.pg.CurrentPrompt(a.ID); err == nil && cur == tmpl {
+			continue
+		}
+		if _, err := s.m.pg.ResetPromptToDefault(a.ID, tmpl); err != nil {
+			log.Printf("[prompts] %s 提示词重刷为 app 归属默认失败: %v", key, err)
+			continue
+		}
+	}
+	log.Printf("[prompts] 移动端/微信生态提示词已按 app 归属规则重刷(一次性)")
 }
 
 // seedPlannerListAssetsBinding adds "planner" to list_assets's binding ONCE
