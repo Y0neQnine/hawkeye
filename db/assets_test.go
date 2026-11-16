@@ -72,6 +72,22 @@ func TestUpsertRootDomainEmpty(t *testing.T) {
 	}
 }
 
+func TestUpsertRootDomainRejectsIP(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	if _, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "203.0.113.77"}); err == nil {
+		t.Fatal("expected error for IP root domain")
+	}
+	var cnt int
+	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE type='root_domain' AND domain='203.0.113.77'`).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("IP stored as root_domain: %d rows", cnt)
+	}
+}
+
 // =====================================================================
 // IP
 // =====================================================================
@@ -532,6 +548,43 @@ func TestUpsertHTTPService(t *testing.T) {
 	d.QueryRow(`SELECT array_length(technologies, 1) FROM assets WHERE id = $1`, id1).Scan(&techCnt)
 	if techCnt != 4 {
 		t.Errorf("technologies merge: want 4, got %d", techCnt)
+	}
+}
+
+// A site hosted on a bare address is an ip asset, never a root_domain one:
+// the host has no registrable domain, and filing it under 根域名 makes the
+// address show up where only domains belong.
+func TestIPHostHasNoRootDomainAsset(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	const ipHost = "203.0.113.78"
+	httpID, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{URL: "http://" + ipHost + ":8080/", TaskID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epID, err := av2.UpsertEndpoint(UpsertEndpointReq{URL: "http://" + ipHost + ":8080/index.html", Method: "GET", TaskID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM assets WHERE id IN ($1, $2)`, httpID, epID)
+	defer d.Exec(`DELETE FROM assets WHERE type='root_domain' AND domain=$1`, ipHost)
+
+	for _, id := range []int64{httpID, epID} {
+		var root string
+		if err := d.QueryRow(`SELECT COALESCE(root_domain,'') FROM assets WHERE id=$1`, id).Scan(&root); err != nil {
+			t.Fatal(err)
+		}
+		if root != "" {
+			t.Errorf("asset %d root_domain: want empty, got %q", id, root)
+		}
+	}
+	var cnt int
+	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE type='root_domain' AND domain=$1`, ipHost).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("expected no root_domain asset for %s, got %d", ipHost, cnt)
 	}
 }
 

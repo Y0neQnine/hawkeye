@@ -1344,3 +1344,13 @@ CREATE TABLE IF NOT EXISTS monitor_targets (
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_targets_due ON monitor_targets(enabled, last_run_at);
 ALTER TABLE monitor_targets ADD COLUMN IF NOT EXISTS last_snapshot_at TIMESTAMPTZ;
+
+-- =====================================================================
+-- 数据修正：IP 不是根域名
+-- =====================================================================
+-- 旧版本对 IP 主机计算根域名时拿到的是 IP 本身，service/endpoint 落库时又把它
+-- 登记成 root_domain 资产，于是「根域名」里出现 IP。代码侧已改为 IP 主机不再
+-- 生成 root_domain；这里清掉存量脏数据。try_inet 对域名返回 NULL，故只命中地址。
+-- 幂等，每次启动可重复执行。
+DELETE FROM assets WHERE type = 'root_domain' AND try_inet(domain) IS NOT NULL;
+UPDATE assets SET root_domain = NULL WHERE try_inet(root_domain) IS NOT NULL;

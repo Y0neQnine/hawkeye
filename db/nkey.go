@@ -36,6 +36,19 @@ func RootDomain(host string) (root string, isApex bool) {
 	return etld1, h == etld1
 }
 
+// RootDomainAsset returns the root domain to persist for host, or "" when host
+// is empty or an IP literal. RootDomain keeps IPs unchanged on purpose (scope
+// matching treats them as apex), but an address must never become a root_domain
+// asset — it belongs in the ip view and would otherwise pollute 根域名.
+func RootDomainAsset(host string) string {
+	h := DomainKey(host)
+	if h == "" || net.ParseIP(h) != nil {
+		return ""
+	}
+	root, _ := RootDomain(h)
+	return root
+}
+
 func PortKey(ipID int64, proto string, port int) string {
 	return itoa(ipID) + "|" + strings.ToLower(proto) + "|" + strconv.Itoa(port)
 }

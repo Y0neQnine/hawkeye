@@ -355,6 +355,9 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
 	}
+	if net.ParseIP(domain) != nil {
+		return 0, fmt.Errorf("root_domain must be a domain name, not an IP address")
+	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertRootDomain(req)
@@ -568,10 +571,7 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 		})
 	}
 
-	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
-		rootDomain = domain
-	}
+	rootDomain := RootDomainAsset(domain)
 
 	// Resolve by root domain first, then the asset's exact normalized ICP.
 	companyID, err := s.resolveCompanyWithICP(rootDomain, "", req.ICP)
@@ -579,11 +579,13 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 		return 0, err
 	}
 
-	// side effect 1: ensure root domain exists
-	_, _ = s.UpsertRootDomain(UpsertRootDomainReq{
-		Domain: rootDomain,
-		TaskID: req.TaskID,
-	})
+	// side effect 1: ensure root domain exists (skipped for IP hosts)
+	if rootDomain != "" {
+		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{
+			Domain: rootDomain,
+			TaskID: req.TaskID,
+		})
+	}
 
 	// side effect 2: if A/AAAA record, upsert each IP + bind domain.
 	// RecordValue is []string; each element may itself be comma-separated (legacy).
@@ -902,10 +904,7 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 	}
 	normURL := normalizeURL(req.URL)
 	domain, port, serviceName := parseURL(normURL)
-	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
-		rootDomain = domain
-	}
+	rootDomain := RootDomainAsset(domain)
 
 	cseg := calcCSegment(req.IP)
 	companyID, err := s.resolveCompanyWithICP(rootDomain, req.IP, "")
@@ -926,9 +925,12 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 		return 0, err
 	}
 
-	var domainVal, ipVal, csegVal, titleVal, faviconVal any
+	var domainVal, rootDomainVal, ipVal, csegVal, titleVal, faviconVal any
 	if domain != "" {
 		domainVal = domain
+	}
+	if rootDomain != "" {
+		rootDomainVal = rootDomain
 	}
 	if req.IP != "" {
 		ipVal = req.IP
@@ -961,6 +963,7 @@ ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
     page_title     = COALESCE(EXCLUDED.page_title,     assets.page_title),
     favicon_mmh3   = COALESCE(EXCLUDED.favicon_mmh3,   assets.favicon_mmh3),
     ip             = COALESCE(EXCLUDED.ip,             assets.ip),
+    root_domain    = EXCLUDED.root_domain,
     c_segment      = COALESCE(EXCLUDED.c_segment,      assets.c_segment),
     technologies   = CASE
         WHEN COALESCE(cardinality(EXCLUDED.technologies), 0) = 0 THEN assets.technologies
@@ -984,7 +987,7 @@ ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
     END,
     last_seen      = now()
 RETURNING id`,
-		normURL, serviceName, domainVal, ipVal, nullableInt(port), rootDomain,
+		normURL, serviceName, domainVal, ipVal, nullableInt(port), rootDomainVal,
 		csegVal, faviconVal, techsArr, req.StatusCode, req.ContentLength, titleVal,
 		authJSON, companyID, taskIDs,
 	).Scan(&id)
@@ -1051,13 +1054,7 @@ func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error
 	serviceName := strings.ToLower(strings.TrimSpace(req.ServiceName))
 
 	domain := DomainKey(req.Domain)
-	var rootDomain string
-	if domain != "" {
-		rootDomain, _ = RootDomain(domain)
-		if rootDomain == "" {
-			rootDomain = domain
-		}
-	}
+	rootDomain := RootDomainAsset(domain)
 
 	cseg := calcCSegment(req.IP)
 	companyID, err := s.resolveCompanyWithICP(rootDomain, req.IP, "")
@@ -1101,6 +1098,7 @@ VALUES ('service', 'other', $1, $2, $3, $4, $5, $6::cidr, $7::jsonb[], $8, 'scop
 ON CONFLICT (COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE type = 'service' AND service_type = 'other' DO UPDATE SET
     domain     = COALESCE(EXCLUDED.domain,     assets.domain),
     ip         = COALESCE(EXCLUDED.ip,         assets.ip),
+    root_domain = EXCLUDED.root_domain,
     c_segment  = COALESCE(EXCLUDED.c_segment,  assets.c_segment),
     auth       = (
         SELECT ARRAY(
@@ -1146,9 +1144,10 @@ RETURNING id`,
 
 // linkHostAssets ensures a service/endpoint's host is also registered as its own
 // root_domain and (when it's a real subdomain, not the apex or an IP) subdomain
-// asset — so those asset types stay populated and can anchor task scope. Best-effort.
+// asset — so those asset types stay populated and can anchor task scope. IP hosts
+// register as ip assets only. Best-effort.
 func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) {
-	if rootDomain != "" {
+	if rootDomain != "" && net.ParseIP(rootDomain) == nil {
 		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: taskID})
 	}
 	if domain != "" && domain != rootDomain && net.ParseIP(domain) == nil {
@@ -1189,10 +1188,7 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 	method := strings.ToUpper(req.Method)
 	normURL := normalizeURL(req.URL)
 	domain, port, _ := parseURL(normURL)
-	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
-		rootDomain = domain
-	}
+	rootDomain := RootDomainAsset(domain)
 
 	cseg := calcCSegment(req.IP)
 	companyID, err := s.resolveCompanyWithICP(rootDomain, req.IP, "")
@@ -1241,9 +1237,10 @@ ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
             ORDER BY (elem->>'location'), (elem->>'name'), elem::text DESC
         )
     ),
-    ip         = COALESCE(EXCLUDED.ip,        assets.ip),
-    c_segment  = COALESCE(EXCLUDED.c_segment, assets.c_segment),
-    task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
+    ip          = COALESCE(EXCLUDED.ip,        assets.ip),
+    root_domain = EXCLUDED.root_domain,
+    c_segment   = COALESCE(EXCLUDED.c_segment, assets.c_segment),
+    task_ids    = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     company_id = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
         ELSE COALESCE(EXCLUDED.company_id, assets.company_id)
