@@ -733,6 +733,7 @@ func (s *Server) Handler() http.Handler {
 	// asset system
 	mux.HandleFunc("GET /api/assets", s.listAssets)
 	mux.HandleFunc("GET /api/assets/counts", s.assetCounts)
+	mux.HandleFunc("GET /api/assets/directories", s.assetDirectories)
 	mux.HandleFunc("GET /api/assets/export", s.exportAssets)
 	mux.HandleFunc("POST /api/assets/import", s.importAssets)
 	mux.HandleFunc("POST /api/assets", s.insertAssets)

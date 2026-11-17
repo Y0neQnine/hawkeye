@@ -432,8 +432,18 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 		if !ok || oldID <= 0 {
 			return nil, nil, errors.New("archived asset has invalid id")
 		}
+		// Archives created before company_ids existed restore without the column,
+		// which would violate NOT NULL; derive it from the primary company.
+		companyIDs := archiveCompanyIDs(row)
+		row["company_ids"] = companyIDs
 		if companyID, ok := jsonInt64(row["company_id"]); ok && companyID > 0 && !rowExists(tx, "companies", companyID) {
-			row["company_id"] = nil
+			companyIDs = removeInt64(companyIDs, companyID)
+			row["company_ids"] = companyIDs
+			if len(companyIDs) > 0 {
+				row["company_id"] = companyIDs[0]
+			} else {
+				row["company_id"] = nil
+			}
 			row["company_source"] = "explicit"
 			warnings = append(warnings, fmt.Sprintf("资产 %d 的企业 %d 已删除，已恢复为未归属", oldID, companyID))
 		}
@@ -474,6 +484,37 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 		mapping[oldID] = candidate
 	}
 	return mapping, warnings, nil
+}
+
+// archiveCompanyIDs reads the archived company set, falling back to the
+// primary company for archives written before company_ids existed.
+func archiveCompanyIDs(row map[string]any) []int64 {
+	out := []int64{}
+	seen := map[int64]bool{}
+	if values, ok := row["company_ids"].([]any); ok {
+		for _, item := range values {
+			if id, ok := jsonInt64(item); ok && id > 0 && !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	if len(out) == 0 {
+		if id, ok := jsonInt64(row["company_id"]); ok && id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func removeInt64(ids []int64, drop int64) []int64 {
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id != drop {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func mergeJSONTaskID(value any, taskID int64) []int64 {

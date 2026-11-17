@@ -129,12 +129,13 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 	return writeTool(
 		"insert_assets",
 		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
-			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method；third_party→url+evidence_url+company_id。其余字段含义见各自说明。\n"+
+			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method；third_party→url+evidence_url。其余字段含义见各自说明。\n"+
+			"company_id 可选：缺省时资产归属到当前任务关联的全部企业（任务关联多企业则全部记录）。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"service(HTTP) 只要给 url 即可：系统会自动只读探测首页并识别系统/技术栈（status_code/content_length/page_title/technologies/favicon_mmh3），随后可用 list_assets 回读，无需重复手工抓取。\n"+
 			"ip 类型照常登记解析/探测到的地址：识别为 CDN/WAF 的共享出口也要登记，并在 technologies 打 CDN/WAF/厂商标签，同时用 bound_domains 记录它是哪些目标域名的解析结果；非目标企业的 IP 不要为此扩大 company_scope。\n"+
 			"app 类型同时用于移动 App、公众号/服务号、小程序：category 标平台形态，bundle_id 填 Bundle ID/包名/公开 AppID。只登记目标主体自己发布/运营的应用（开发者/认证主体/备案主体一致）；第三方平台不登记为 app。\n"+
-			"third_party 用于目标业务涉及的第三方平台（政务平台、预约挂号平台、支付/办理入口等）：url 填平台自身的入口地址，evidence_url 填目标侧引用该平台的具体页面（官网指引、公告、办事说明等），两个 URL 都必须提供且指向不同位置；缺 evidence_url 会被拒绝。company_id 填涉及该平台的目标企业。third_party 表示'目标与该平台有关联'，不代表平台属于目标，也不会进入目标的域名/IP 范围。\n"+
+			"third_party 用于目标业务涉及的第三方平台（政务平台、预约挂号平台、支付/办理入口等）：url 填平台自身的入口地址，evidence_url 填目标侧引用该平台的具体页面（官网指引、公告、办事说明等），两个 URL 都必须提供且指向不同位置；缺 evidence_url 会被拒绝。company_id 可填涉及该平台的目标企业，缺省用当前任务关联企业；同一平台被多家企业引用时共用同一条记录，company_ids 保留全部企业。third_party 表示'目标与该平台有关联'，不代表平台属于目标，也不会进入目标的域名/IP 范围。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
@@ -172,12 +173,12 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						}, "port"),
 					},
 					// app
-					"app_name":    str("应用/账号/小程序名称（app 类型必填）；third_party 类型填第三方平台名称（可选，缺省取入口 URL 主机名）"),
-					"bundle_id":   str("iOS Bundle ID / Android 包名 / 公开微信 AppID（app 类型可选，有则填，用于去重）"),
-					"category":    str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序；third_party 可填 政务平台/预约挂号平台/支付平台 等（可选，建议填）"),
-					"description": str("描述：开发者/认证主体 + 下载或入口 URL；third_party 填该平台与目标的关联说明（可选）"),
-					"app_icp":     str("应用 ICP 备案（可选）"),
-					"company_id":  intp("归属企业 id。app：仅当应用确属该企业（商店开发者/认证主体/备案主体一致，或官方声明自有）时才填，第三方平台不填；third_party：必填，填业务上涉及该平台的目标企业。id 由 add_company_scope 返回"),
+					"app_name":     str("应用/账号/小程序名称（app 类型必填）；third_party 类型填第三方平台名称（可选，缺省取入口 URL 主机名）"),
+					"bundle_id":    str("iOS Bundle ID / Android 包名 / 公开微信 AppID（app 类型可选，有则填，用于去重）"),
+					"category":     str("平台形态，如 iOS App / Android App / 微信公众号 / 微信服务号 / 微信小程序；third_party 可填 政务平台/预约挂号平台/支付平台 等（可选，建议填）"),
+					"description":  str("描述：开发者/认证主体 + 下载或入口 URL；third_party 填该平台与目标的关联说明（可选）"),
+					"app_icp":      str("应用 ICP 备案（可选）"),
+					"company_id":   intp("归属企业 id（可选）。app：仅当应用确属该企业（商店开发者/认证主体/备案主体一致，或官方声明自有）时才填；third_party：可填业务上涉及该平台的目标企业，缺省用当前任务关联企业。id 由 add_company_scope 返回"),
 					"evidence_url": str("third_party 必填：目标侧引用该第三方平台的具体页面 URL（官网指引/公告/办事说明），须与 url 不同；用于证明关联真实存在"),
 					// service (http)
 					"url":         str("完整 URL，含协议和端口（HTTP 服务必填，service_type 自动设为 http）；third_party 填平台自身入口 URL（必填）"),
@@ -341,10 +342,6 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					})
 
 				case "third_party":
-					if item.CompanyID == nil {
-						errs = append(errs, errEntry{Index: i, Error: "third_party 需要 company_id（涉及该平台的目标企业）"})
-						continue
-					}
 					id, err = t.as.UpsertThirdParty(db.UpsertThirdPartyReq{
 						Name:        item.AppName,
 						Category:    item.Category,

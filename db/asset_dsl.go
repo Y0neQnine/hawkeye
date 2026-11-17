@@ -322,13 +322,14 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		return b.next(n) + " = ANY(task_ids)", nil
 	}
 
-	// company_id: exact integer
+	// company_id: integer membership (primary or any associated company)
 	if f == "company_id" {
 		n, err := strconv.ParseInt(e.Value, 10, 64)
 		if err != nil {
 			return "", fmt.Errorf("company_id 需要整数值: %s", e.Value)
 		}
-		return "company_id = " + b.next(n), nil
+		ph := b.next(n)
+		return "(" + ph + " = company_id OR " + ph + " = ANY(company_ids))", nil
 	}
 
 	// numeric fields
@@ -501,7 +502,7 @@ func (s *AssetStore) CountDSL(dsl, typ string, taskID, companyID int64) (int, er
 	}
 	if companyID > 0 {
 		args = append(args, companyID)
-		where += fmt.Sprintf(" AND company_id = $%d", len(args))
+		where += fmt.Sprintf(" AND (company_id = $%d OR $%d = ANY(company_ids))", len(args), len(args))
 	}
 	var n int
 	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
@@ -538,7 +539,7 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID, companyID int64, limit, o
 	}
 	if companyID > 0 {
 		args = append(args, companyID)
-		where += fmt.Sprintf(" AND company_id = $%d", len(args))
+		where += fmt.Sprintf(" AND (company_id = $%d OR $%d = ANY(company_ids))", len(args), len(args))
 	}
 	args = append(args, limit, offset)
 	q := assetSelectCols + " WHERE " + where +

@@ -513,6 +513,11 @@ export const api = {
     get<Record<string, number>>(
       `/assets/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : companyId ? `?company_id=${companyId}` : ""}`,
     ),
+  // Companies owning assets of a type, for the per-company asset directories.
+  assetDirectories: (type = "third_party") =>
+    get<{ directories: { company_id: number; name: string; count: number }[] }>(
+      `/assets/directories?type=${encodeURIComponent(type)}`,
+    ).then((r) => r?.directories ?? []),
   deleteAssets: (ids: number[]) =>
     http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
   exportAssets: async (opts: { companyId?: number; taskId?: string; type?: string; dsl?: string } = {}) => {

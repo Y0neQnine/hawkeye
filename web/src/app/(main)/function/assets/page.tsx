@@ -130,6 +130,13 @@ export default function AssetsPage() {
   const assetsRequestRef = React.useRef(0);
   const [rowsTab, setRowsTab] = React.useState("");
 
+  // 第三方目录: one directory per company that references the platform. The
+  // selected directory narrows the list server-side via company membership.
+  const [thirdPartyDirs, setThirdPartyDirs] = React.useState<
+    { company_id: number; name: string; count: number }[]
+  >([]);
+  const [thirdPartyDir, setThirdPartyDir] = React.useState(0);
+
   // asset selection & delete
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
   const [deleteIds, setDeleteIds] = React.useState<number[]>([]);
@@ -251,6 +258,17 @@ export default function AssetsPage() {
     loadMeta();
   }, [loadMeta]);
 
+  // Third-party directories are company membership counts; reload on manual refresh.
+  React.useEffect(() => {
+    if (tab !== "third_party" || companyView) return;
+    api
+      .assetDirectories("third_party")
+      .then(setThirdPartyDirs)
+      .catch(() => {
+        /* Keep the last successful directory snapshot on a transient failure. */
+      });
+  }, [tab, companyView, refreshKey]);
+
   // Reset query + page + selection when switching tabs
   // biome-ignore lint/correctness/useExhaustiveDependencies: tab changes intentionally reset tab-local controls.
   React.useEffect(() => {
@@ -261,6 +279,7 @@ export default function AssetsPage() {
     setRowsTab("");
     setTotal(0);
     setLoaded(false);
+    setThirdPartyDir(0);
   }, [tab]);
 
   // Entering/leaving a company is a scope change: drop tab-local search and paging.
@@ -278,9 +297,13 @@ export default function AssetsPage() {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: these controls intentionally reset server pagination.
   React.useEffect(() => setPage(0), [tab, size, query]);
+  React.useEffect(() => setPage(0), [thirdPartyDir]);
 
   const dslMode = query.trim() !== "";
   const companyId = companyView?.id;
+  // Inside a company view the scope is fixed to that company; otherwise the
+  // third-party tab can be narrowed to one company directory.
+  const listCompanyId = companyId ?? (tab === "third_party" && thirdPartyDir > 0 ? thirdPartyDir : undefined);
 
   // Server-side paginated page loader for the active data tab (company tab excluded).
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit manual-reload trigger.
@@ -293,8 +316,8 @@ export default function AssetsPage() {
     const run = async () => {
       try {
         const r = dsl
-          ? await api.searchAssets(dsl, tab, size, offset, companyId)
-          : await api.assets(tab, size, offset, companyId);
+          ? await api.searchAssets(dsl, tab, size, offset, listCompanyId)
+          : await api.assets(tab, size, offset, listCompanyId);
         if (assetsRequestRef.current !== request) return;
         setRows(r.assets);
         setRowsTab(tab);
@@ -318,7 +341,7 @@ export default function AssetsPage() {
       clearTimeout(tid);
       if (assetsRequestRef.current === request) assetsRequestRef.current++;
     };
-  }, [tab, page, size, query, companyId, refreshKey]);
+  }, [tab, page, size, query, listCompanyId, refreshKey]);
 
   React.useEffect(() => {
     if (tab === "company") return;
@@ -332,7 +355,26 @@ export default function AssetsPage() {
     return m;
   }, [companies]);
 
-  const companyName = (id?: number) => (id ? (companyById.get(id) ?? "") : "");
+  // company_ids is the full membership set; fall back to the primary company for
+  // rows written before the column existed.
+  const companyNames = (a: Asset): string[] => {
+    const ids = a.company_ids?.length ? a.company_ids : a.company_id ? [a.company_id] : [];
+    return ids.map((id) => companyById.get(id) ?? `#${id}`);
+  };
+
+  const companyCell = (a: Asset) => {
+    const names = companyNames(a);
+    if (names.length === 0) return <span className="text-xs text-muted-foreground">未归属</span>;
+    return (
+      <div className="flex max-w-[14rem] flex-wrap gap-1">
+        {names.map((name) => (
+          <Badge key={name} variant="secondary" className="text-[10px] font-normal">
+            {name}
+          </Badge>
+        ))}
+      </div>
+    );
+  };
 
   const tabCounts: Record<string, number> = { ...counts, company: companies.length };
   const totalAssets = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -420,7 +462,7 @@ export default function AssetsPage() {
               <TabsTrigger key={t.key} value={t.key}>
                 <t.icon className="size-3.5" />
                 {t.label}
-                <span className="ml-1 tabular-nums text-muted-foreground">{tabCounts[t.key]}</span>
+                <span className="ml-1 tabular-nums text-muted-foreground">{tabCounts[t.key] ?? 0}</span>
               </TabsTrigger>
             ))}
           </TabsList>
@@ -524,9 +566,7 @@ export default function AssetsPage() {
                 </TableCell>
                 <TableCell className="font-mono text-xs font-medium">{a.domain}</TableCell>
                 <TableCell className="text-xs">{a.icp || "—"}</TableCell>
-                <TableCell className="text-xs">
-                  {companyName(a.company_id) || <span className="text-muted-foreground">未归属</span>}
-                </TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
@@ -547,7 +587,7 @@ export default function AssetsPage() {
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "IP", "C段", "标签", "绑定域名", "开放端口", ""]}
+            cols={["", "IP", "C段", "标签", "绑定域名", "开放端口", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -577,6 +617,7 @@ export default function AssetsPage() {
                     mono
                   />
                 </TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
@@ -597,7 +638,7 @@ export default function AssetsPage() {
         <TabsContent value="subdomain" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "域名", "根域名", "解析类型", "解析值", ""]}
+            cols={["", "域名", "根域名", "解析类型", "解析值", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -619,6 +660,7 @@ export default function AssetsPage() {
                 <TableCell className="max-w-xs truncate font-mono text-xs">
                   {(Array.isArray(a.record_value) ? a.record_value.join(", ") : a.record_value) || "—"}
                 </TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
@@ -639,7 +681,7 @@ export default function AssetsPage() {
         <TabsContent value="app" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "应用名", "Bundle ID", "分类", "ICP 备案", ""]}
+            cols={["", "应用名", "Bundle ID", "分类", "ICP 备案", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -659,6 +701,7 @@ export default function AssetsPage() {
                 <TableCell className="font-mono text-xs">{a.bundle_id || "—"}</TableCell>
                 <TableCell className="text-xs">{a.category || "—"}</TableCell>
                 <TableCell className="text-xs">{a.app_icp || "—"}</TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
@@ -677,9 +720,34 @@ export default function AssetsPage() {
 
         {/* 第三方 */}
         <TabsContent value="third_party" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
+          {!companyView && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="pr-1 text-xs text-muted-foreground">企业目录</span>
+              <Button
+                size="sm"
+                variant={thirdPartyDir === 0 ? "default" : "outline"}
+                className="h-7"
+                onClick={() => setThirdPartyDir(0)}
+              >
+                全部
+              </Button>
+              {thirdPartyDirs.map((d) => (
+                <Button
+                  key={d.company_id}
+                  size="sm"
+                  variant={thirdPartyDir === d.company_id ? "default" : "outline"}
+                  className="h-7"
+                  onClick={() => setThirdPartyDir(d.company_id)}
+                >
+                  {d.name}
+                  <span className="ml-1 tabular-nums opacity-70">{d.count}</span>
+                </Button>
+              ))}
+            </div>
+          )}
           {searchBox}
           <AssetCard
-            cols={["", "第三方平台", "分类", "平台入口 URL", "目标侧佐证 URL", ""]}
+            cols={["", "第三方平台", "分类", "平台入口 URL", "目标侧佐证 URL", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -725,6 +793,7 @@ export default function AssetsPage() {
                     "—"
                   )}
                 </TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"
@@ -745,7 +814,7 @@ export default function AssetsPage() {
         <TabsContent value="service" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "服务", "域名", "IP", "端口", "状态码", "标题", "指纹", "认证", ""]}
+            cols={["", "服务", "域名", "IP", "端口", "状态码", "标题", "指纹", "认证", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -820,6 +889,7 @@ export default function AssetsPage() {
                       })
                     )}
                   </TableCell>
+                  <TableCell>{companyCell(a)}</TableCell>
                   <TableCell className="w-8 pl-0">
                     <Button
                       variant="ghost"
@@ -841,7 +911,7 @@ export default function AssetsPage() {
         <TabsContent value="endpoint" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "方法", "完整地址", "参数", ""]}
+            cols={["", "方法", "完整地址", "参数", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -872,6 +942,7 @@ export default function AssetsPage() {
                     mono
                   />
                 </TableCell>
+                <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
                     variant="ghost"

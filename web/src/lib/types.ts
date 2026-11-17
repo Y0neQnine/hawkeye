@@ -220,6 +220,9 @@ export interface Asset {
   id: number;
   type: NewAssetType;
   company_id?: number;
+  // Every company the asset belongs to (multi-company tasks and shared
+  // third-party platforms). company_id is the primary entry.
+  company_ids?: number[];
   task_ids: number[];
   domain?: string;
   root_domain?: string;

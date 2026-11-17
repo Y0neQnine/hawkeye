@@ -223,6 +223,24 @@ func (s *CompanyStore) DeleteCompanyWithAssets(id int64, deleteAssets bool) (ass
 		return 0, err
 	}
 	if deleteAssets {
+		// Third-party rows can be shared by several companies; when this company
+		// is one of them the row survives and only its membership is removed.
+		if _, err := tx.Exec(`
+UPDATE assets
+SET company_ids = array_remove(company_ids, $1),
+    company_id = CASE
+        WHEN company_id = $1 THEN (
+            SELECT min(c) FROM unnest(array_remove(company_ids, $1)) AS c
+        )
+        ELSE company_id
+    END,
+    company_source = CASE
+        WHEN company_id = $1 THEN 'scope'
+        ELSE company_source
+    END
+WHERE $1 = ANY(company_ids) AND cardinality(array_remove(company_ids, $1)) > 0`, id); err != nil {
+			return 0, err
+		}
 		res, err := tx.Exec(`DELETE FROM assets WHERE company_id = $1`, id)
 		if err != nil {
 			return 0, err
@@ -262,7 +280,7 @@ func (s *CompanyStore) ListCompanies() ([]*CompanyWithScope, error) {
 SELECT c.id, c.name, c.nkey, c.logo, c.created_at::text, c.updated_at::text,
        COUNT(DISTINCT a.id) AS asset_count
 FROM companies c
-LEFT JOIN assets a ON a.company_id = c.id
+LEFT JOIN assets a ON a.company_id = c.id OR c.id = ANY(a.company_ids)
 GROUP BY c.id
 ORDER BY c.name`)
 	if err != nil {
@@ -507,9 +525,11 @@ func (s *CompanyStore) RecomputeAttribution() error {
 func recomputeAttributionTx(tx *sql.Tx) (string, error) {
 	// Only derived rows are cleared. Historical rows migrated without provenance
 	// are marked explicit by schema.sql, which is the non-destructive default.
+	// company_ids is rebuilt together with company_id so the multi-company set
+	// never keeps stale membership.
 	if _, err := tx.Exec(`
 UPDATE assets
-SET company_id = NULL, company_source = 'scope'
+SET company_id = NULL, company_ids = '{}'::bigint[], company_source = 'scope'
 WHERE company_source = 'scope'`); err != nil {
 		return "", err
 	}
@@ -526,7 +546,7 @@ WITH matched AS (
     ORDER BY a.id, length(cs.domain) DESC, cs.company_id
 )
 UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
+SET company_id = matched.company_id, company_ids = ARRAY[matched.company_id], company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
@@ -551,7 +571,7 @@ WITH matched AS (
     ORDER BY a.id, length(cs.domain) DESC, cs.company_id
 )
 UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
+SET company_id = matched.company_id, company_ids = ARRAY[matched.company_id], company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
@@ -569,7 +589,7 @@ WITH matched AS (
     ORDER BY a.id, masklen(cs.net) DESC, cs.company_id
 )
 UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
+SET company_id = matched.company_id, company_ids = ARRAY[matched.company_id], company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
@@ -590,29 +610,31 @@ WITH matched AS (
     ORDER BY a.id, cs.company_id
 )
 UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
+SET company_id = matched.company_id, company_ids = ARRAY[matched.company_id], company_source = 'scope'
 FROM matched
 WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
 	}
-	// Task-company fallback: an address collected under a task opened for exactly
-	// one company belongs to that company when no scope rule claimed it. Addresses
-	// seen by tasks of several companies stay unowned instead of guessing.
+	// Task-company fallback: an asset collected under tasks associated with
+	// companies belongs to all of them when no scope rule claimed it. This
+	// covers every asset type so a task created for several companies marks
+	// each of its assets with the full company set.
 	if _, err := tx.Exec(`
 WITH matched AS (
-    SELECT a.id AS asset_id, min(ts.company_id) AS company_id,
-           count(DISTINCT ts.company_id) AS n
+    SELECT a.id AS asset_id,
+           array_agg(DISTINCT ts.company_id ORDER BY ts.company_id) AS company_ids
     FROM assets a
     JOIN task_scope ts ON ts.kind = 'company' AND ts.company_id IS NOT NULL
       AND ts.task_id = ANY(a.task_ids)
     WHERE a.company_id IS NULL
-      AND a.type = 'ip'
     GROUP BY a.id
 )
 UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
+SET company_id = matched.company_ids[1],
+    company_ids = matched.company_ids,
+    company_source = 'scope'
 FROM matched
-WHERE a.id = matched.asset_id AND matched.n = 1`); err != nil {
+WHERE a.id = matched.asset_id`); err != nil {
 		return "", err
 	}
 	return malformedIPAssetWarning(tx)

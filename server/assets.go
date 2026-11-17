@@ -422,6 +422,30 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // =====================================================================
+// GET /api/assets/directories
+// =====================================================================
+
+// assetDirectories lists companies that own assets of a type, with counts.
+// The asset view uses it for per-company directories (e.g. 第三方平台 by 企业).
+func (s *Server) assetDirectories(w http.ResponseWriter, r *http.Request) {
+	as := s.assetStore()
+	if as == nil {
+		writeErr(w, 503, "database unavailable")
+		return
+	}
+	typ := r.URL.Query().Get("type")
+	if typ == "" {
+		typ = "third_party"
+	}
+	dirs, err := as.CompanyAssetCounts(typ)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"directories": dirs})
+}
+
+// =====================================================================
 // DELETE /api/assets
 // =====================================================================
 
@@ -818,20 +842,20 @@ func parseAssetImportCSV(records [][]string, headerIdx int) ([]assetInput, []ass
 			Type:         strings.ToLower(get(rec, "type")),
 			Domain:       get(rec, "domain"),
 			ICP:          get(rec, "icp"),
-			RecordType:  get(rec, "record_type"),
-			RecordValue: splitImportCell(get(rec, "record_value")),
-			IP:          get(rec, "ip"),
+			RecordType:   get(rec, "record_type"),
+			RecordValue:  splitImportCell(get(rec, "record_value")),
+			IP:           get(rec, "ip"),
 			BoundDomains: splitImportCell(get(rec, "bound_domains")),
-			OpenPorts:   parseImportPorts(get(rec, "open_ports")),
-			AppName:     get(rec, "app_name"),
-			BundleID:    get(rec, "bundle_id"),
-			Category:    get(rec, "category"),
-			AppICP:      get(rec, "app_icp"),
-			URL:         get(rec, "url"),
-			EvidenceURL: get(rec, "evidence_url"),
-			ServiceIP:   get(rec, "service_ip"),
-			PageTitle:   get(rec, "page_title"),
-			FaviconMMH3: get(rec, "favicon_mmh3"),
+			OpenPorts:    parseImportPorts(get(rec, "open_ports")),
+			AppName:      get(rec, "app_name"),
+			BundleID:     get(rec, "bundle_id"),
+			Category:     get(rec, "category"),
+			AppICP:       get(rec, "app_icp"),
+			URL:          get(rec, "url"),
+			EvidenceURL:  get(rec, "evidence_url"),
+			ServiceIP:    get(rec, "service_ip"),
+			PageTitle:    get(rec, "page_title"),
+			FaviconMMH3:  get(rec, "favicon_mmh3"),
 			Technologies: splitImportCell(get(rec, "technologies")),
 			ServiceName:  get(rec, "service_name"),
 			Method:       strings.ToUpper(get(rec, "method")),

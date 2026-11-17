@@ -92,8 +92,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_http ON assets(url) WHERE type 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_other
     ON assets(COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE type = 'service' AND service_type = 'other';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_endpoint     ON assets(url, method) WHERE type = 'endpoint';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_third_party
-    ON assets(url, COALESCE(company_id,0)) WHERE type = 'third_party';
+-- third_party 按入口 URL 共用一行（见文件末尾的多企业迁移），不再按企业拆行。
 CREATE INDEX IF NOT EXISTS idx_av2_company      ON assets(company_id)       WHERE company_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_company_type ON assets(company_id, type) WHERE company_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_task_ids     ON assets USING GIN(task_ids);
@@ -802,24 +801,11 @@ CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
 
--- Backfill ownership for addresses collected under a task opened for exactly one
--- company: they belong to that company even when no scope rule (bound domain /
--- IP-CIDR / ICP) matched. Tasks spanning several companies are ambiguous and stay
--- unowned. Idempotent: only fills NULL scope-derived rows on each startup.
-UPDATE assets a
-SET company_id = matched.company_id, company_source = 'scope'
-FROM (
-    SELECT a.id AS asset_id, min(ts.company_id) AS company_id,
-           count(DISTINCT ts.company_id) AS n
-    FROM assets a
-    JOIN task_scope ts ON ts.kind = 'company' AND ts.company_id IS NOT NULL
-      AND ts.task_id = ANY(a.task_ids)
-    WHERE a.company_id IS NULL
-      AND a.company_source = 'scope'
-      AND a.type = 'ip'
-    GROUP BY a.id
-) AS matched
-WHERE a.id = matched.asset_id AND matched.n = 1;
+-- Backfill ownership for assets collected under a task associated with
+-- companies: those companies are recorded on the asset when no scope rule
+-- claimed it. See the multi-company migration at the end of this file — the
+-- rule now covers every asset type and keeps all task companies, so the older
+-- single-company IP-only backfill is superseded.
 
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录
@@ -1354,3 +1340,103 @@ ALTER TABLE monitor_targets ADD COLUMN IF NOT EXISTS last_snapshot_at TIMESTAMPT
 -- 幂等，每次启动可重复执行。
 DELETE FROM assets WHERE type = 'root_domain' AND try_inet(domain) IS NOT NULL;
 UPDATE assets SET root_domain = NULL WHERE try_inet(root_domain) IS NOT NULL;
+
+-- =====================================================================
+-- 多企业归属：assets.company_ids
+-- =====================================================================
+-- 一个资产可能同时属于多家企业（同一任务关联多企业；第三方平台被多家企业
+-- 共用）。company_id 保留为主企业（兼容所有旧查询），company_ids 记录完整
+-- 归属集合。scope 规则命中时只写命中的企业；没有 scope 归属时用任务关联的
+-- 全部企业补空。幂等，每次启动可重复执行。
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS company_ids BIGINT[] NOT NULL DEFAULT '{}';
+UPDATE assets SET company_ids = ARRAY[company_id]
+WHERE company_id IS NOT NULL AND cardinality(company_ids) = 0;
+CREATE INDEX IF NOT EXISTS idx_av2_company_ids ON assets USING GIN(company_ids);
+
+-- 历史数据回填：未被任何 scope 规则归属的资产，记录其任务关联的全部企业。
+-- 只填 company_id/company_ids 都为空的资产，scope/显式归属优先。任务关联来自
+-- task_scope(kind='company')，与任务创建时写入的关联企业一致。
+UPDATE assets a
+SET company_ids = matched.company_ids,
+    company_id = matched.company_ids[1],
+    company_source = 'scope'
+FROM (
+    SELECT a.id AS asset_id,
+           ARRAY(
+               SELECT DISTINCT ts.company_id
+               FROM task_scope ts
+               WHERE ts.kind = 'company'
+                 AND ts.company_id IS NOT NULL
+                 AND ts.task_id = ANY(a.task_ids)
+               ORDER BY ts.company_id
+           ) AS company_ids
+    FROM assets a
+    WHERE a.company_id IS NULL
+      AND cardinality(a.company_ids) = 0
+) AS matched
+WHERE a.id = matched.asset_id AND cardinality(matched.company_ids) > 0;
+
+-- 第三方资产按入口 URL 共用一行：同一平台被多家企业引用时合并 company_ids，
+-- 而不是每家企业各存一行。保留 id 最小的一行，task_ids/company_ids 取并集，
+-- 并把任务关联、探索锚点迁到保留行后再删除重复行。
+DO $$
+DECLARE
+    grp RECORD;
+    keep_id BIGINT;
+BEGIN
+    FOR grp IN
+        SELECT url, array_agg(id ORDER BY id) AS ids
+        FROM assets
+        WHERE type = 'third_party' AND url IS NOT NULL
+        GROUP BY url
+        HAVING count(*) > 1
+    LOOP
+        keep_id := grp.ids[1];
+
+        UPDATE assets s
+        SET task_ids = (
+                SELECT COALESCE(array_agg(DISTINCT t), '{}'::bigint[])
+                FROM assets a CROSS JOIN LATERAL unnest(a.task_ids) AS t
+                WHERE a.id = ANY(grp.ids)
+            ),
+            company_ids = (
+                SELECT COALESCE(array_agg(DISTINCT c), '{}'::bigint[])
+                FROM assets a CROSS JOIN LATERAL unnest(a.company_ids) AS c
+                WHERE a.id = ANY(grp.ids)
+            ),
+            company_id = COALESCE(s.company_id, (
+                SELECT min(c)
+                FROM assets a CROSS JOIN LATERAL unnest(a.company_ids) AS c
+                WHERE a.id = ANY(grp.ids)
+            ))
+        WHERE s.id = keep_id;
+        UPDATE assets s
+        SET company_ids = (
+                SELECT array_agg(DISTINCT c)
+                FROM unnest(s.company_ids || ARRAY[s.company_id]) AS c
+            )
+        WHERE s.id = keep_id AND s.company_id IS NOT NULL;
+
+        INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+        SELECT task_id, keep_id, source, source_summary
+        FROM task_asset_links
+        WHERE asset_id = ANY(grp.ids) AND asset_id <> keep_id
+        ON CONFLICT (task_id, asset_id) DO NOTHING;
+        DELETE FROM task_asset_links WHERE asset_id = ANY(grp.ids) AND asset_id <> keep_id;
+
+        INSERT INTO exploration_anchors(node_id, asset_id)
+        SELECT node_id, keep_id
+        FROM exploration_anchors
+        WHERE asset_id = ANY(grp.ids) AND asset_id <> keep_id
+        ON CONFLICT (node_id, asset_id) DO NOTHING;
+        DELETE FROM exploration_anchors WHERE asset_id = ANY(grp.ids) AND asset_id <> keep_id;
+
+        DELETE FROM assets WHERE id = ANY(grp.ids) AND id <> keep_id;
+    END LOOP;
+END $$;
+
+-- 合并后同一入口 URL 只剩一行，唯一约束不能再按企业区分。
+DROP INDEX IF EXISTS uq_av2_third_party;
+DROP INDEX IF EXISTS uq_av2_third_party_url;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_third_party_url
+    ON assets(url) WHERE type = 'third_party';
