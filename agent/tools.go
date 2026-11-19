@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/fingerprint"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -51,17 +52,21 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
-	as *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs *db.CompanyStore // company store (optional)
-	ts              *db.ExplorationStore
-	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	as     *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	cs     *db.CompanyStore // company store (optional)
+	ts     *db.ExplorationStore
+	worker string
+	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
 	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
 	// are filtered out of the agent's tool list. The scope field stays regardless.
 	coverageDisabled bool
+	// assetsOnly mirrors tasks.assets_only (仅资产采集). True = paths/URIs must never
+	// be requested, so probe_directories is filtered out of the tool list and its
+	// handler refuses to run even if the model calls it.
+	assetsOnly bool
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
@@ -125,7 +130,9 @@ func (t *ToolSet) SetNotify(fn func()) { t.notify = fn }
 // enrich). Kept as an interface here to avoid coupling agent → enrich.
 type EnrichTrigger interface {
 	ResolveDomain(id int64, host string)
-	ProbeSite(id int64, url string)
+	ProbeSite(id int64, url string, taskID int64)
+	// ScanDirectories runs a synchronous, paced directory scan (probe_directories).
+	ScanDirectories(ctx context.Context, rawURL string, extra []string, maxPaths int) (*fingerprint.DirScanResult, error)
 }
 
 // WriteCounts breaks down what a worker persisted this run, by node kind, so the
@@ -168,6 +175,10 @@ func (t *ToolSet) SetCoverageEnabled(enabled bool) { t.coverageDisabled = !enabl
 
 // CoverageDisabled reports whether the coverage feature is off for this task.
 func (t *ToolSet) CoverageDisabled() bool { return t.coverageDisabled }
+
+// SetAssetsOnly records that this task is in assets-only collection mode
+// (tasks.assets_only): directory/path probing must be unavailable.
+func (t *ToolSet) SetAssetsOnly(v bool) { t.assetsOnly = v }
 
 // coverageOnlyTools are the LLM tools that only make sense when asset coverage is
 // on. When the feature is off they are filtered out of the agent's tool list so

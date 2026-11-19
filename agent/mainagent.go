@@ -18,21 +18,26 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	prov            llm.Provider
-	model           string
-	tx              *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window          int                                    // context window in tokens (for compaction)
-	windowFn        func() int                             // optional dynamic task-chain minimum
-	maxTurns        int                                    // max agent turns per run (0 = unlimited)
-	proxyAddr       string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert     string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch       WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir         string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork       func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
-	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	prov           llm.Provider
+	model          string
+	tx             *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window         int                                    // context window in tokens (for compaction)
+	windowFn       func() int                             // optional dynamic task-chain minimum
+	maxTurns       int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr      string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert    string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch      WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn   func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	enrich         EnrichTrigger                          // enrichment engine (probe_directories, nil = tool off)
 }
+
+// SetEnrich wires the enrichment engine so the main agent can run directory
+// probing on demand (nil = probe_directories unavailable).
+func (m *MainAgent) SetEnrich(e EnrichTrigger) { m.enrich = e }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
@@ -115,6 +120,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	tsx.SetTaskID(taskID)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
+	tsx.SetAssetsOnly(as != nil && as.AssetsOnly(taskID))
+	tsx.SetEnrich(m.enrich)       // probe_directories（默认页找后台/指纹目录）
 	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
 	tsx.SetNotifyGoal(notifyGoal) // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发

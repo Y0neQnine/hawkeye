@@ -530,19 +530,19 @@ type assetInsertError struct {
 }
 
 // probeSite enqueues the async fingerprint probe for a collected HTTP service.
-func (s *Server) probeSite(id int64, rawURL string) {
+func (s *Server) probeSite(id int64, rawURL string, taskID int64) {
 	if s.m == nil {
 		return
 	}
 	if eng := s.m.Enrich(); eng != nil {
-		eng.ProbeSite(id, rawURL)
+		eng.ProbeSite(id, rawURL, taskID)
 	}
 }
 
 // insertAssetInputs upserts imported/API-submitted assets. probe, when non-nil,
 // is called for each HTTP service with its new id + URL so the enrichment engine
 // can fingerprint the site (status/title/technologies/favicon).
-func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, probe func(int64, string)) ([]assetInsertResult, []assetInsertError) {
+func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, probe func(int64, string, int64)) ([]assetInsertResult, []assetInsertError) {
 	var results []assetInsertResult
 	var errs []assetInsertError
 	for i, a := range items {
@@ -584,7 +584,7 @@ func insertAssetInputs(as *db.AssetStore, taskID int64, items []assetInput, prob
 			continue
 		}
 		if a.Type == "service" && a.URL != "" && probe != nil {
-			probe(id, a.URL)
+			probe(id, a.URL, taskID)
 		}
 		if taskID > 0 {
 			_ = as.SetTaskAssetSource(taskID, id, "api", "通过资产 API 登记", nil)

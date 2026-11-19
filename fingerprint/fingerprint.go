@@ -44,6 +44,13 @@ type Observation struct {
 	Technologies  []string `json:"technologies"`
 	Matches       []Match  `json:"matches"`
 	FaviconMMH3   string   `json:"favicon_mmh3,omitempty"`
+	// DefaultPage marks a page that is only the web server's / panel's placeholder
+	// (nginx/apache/IIS welcome page, 宝塔「站点创建成功」, directory listing, blank
+	// page): nothing meaningful is deployed at this path yet, so the caller may run
+	// directory probing to find the real backend entry or a fingerprint-revealing
+	// console (swagger/actuator/druid/...). DefaultPageKind names the placeholder.
+	DefaultPage     bool   `json:"default_page"`
+	DefaultPageKind string `json:"default_page_kind,omitempty"`
 	// RetryAfter is the server-requested backoff (429/503), zero when absent or
 	// unparsable.
 	RetryAfter time.Duration `json:"-"`
@@ -85,6 +92,7 @@ func Probe(ctx context.Context, client *http.Client, rawURL string) (*Observatio
 	}
 	obs.Matches = Identify(resp.Header, resp.Cookies(), body)
 	obs.Technologies = Technologies(obs.Matches)
+	obs.DefaultPage, obs.DefaultPageKind = detectDefaultPage(resp.StatusCode, body, len(obs.Matches) == 0)
 
 	// 429 is an explicit rate limit; fetching the icon would just add traffic from
 	// an address the server is already throttling. Other statuses (403/503) are
@@ -117,6 +125,54 @@ func parseRetryAfter(v string) time.Duration {
 		}
 	}
 	return 0
+}
+
+// defaultPageMarkers are lower-cased body substrings that identify a stock web
+// server / panel placeholder page. They are deliberately specific: a real portal
+// that merely mentions "nginx" must not trigger a directory scan.
+var defaultPageMarkers = []struct{ kind, marker string }{
+	{"nginx", "welcome to nginx"},
+	{"openresty", "welcome to openresty"},
+	{"tengine", "welcome to tengine"},
+	{"apache", "apache2 ubuntu default page"},
+	{"apache", "test page for the apache http server"},
+	{"apache", "this is the default web page for this server"},
+	{"apache", "it works!"},
+	{"iis", "iis windows server"},
+	{"iis", "internet information services"},
+	{"baota", "站点创建成功"},
+	{"baota", "宝塔"},
+	{"tomcat", "if you're seeing this page via a web browser"},
+	{"jetty", "welcome to jetty"},
+	{"spring", "whitelabel error page"},
+	{"centos", "welcome to centos"},
+	{"centos", "http server test page"},
+	{"listing", "index of /"},
+	{"listing", "directory listing for /"},
+}
+
+// detectDefaultPage reports whether a response is a stock placeholder (and, when
+// true, which one) so the caller can probe common backend/fingerprint paths.
+// noMatch = the fingerprint rules identified nothing on the page.
+func detectDefaultPage(status int, body []byte, noMatch bool) (bool, string) {
+	low := bytes.ToLower(body)
+	if status == http.StatusNotFound && bytes.Contains(low, []byte("<center>nginx</center>")) {
+		return true, "nginx-404"
+	}
+	if status < 200 || status >= 400 {
+		return false, ""
+	}
+	for _, m := range defaultPageMarkers {
+		if bytes.Contains(low, []byte(m.marker)) {
+			return true, m.kind
+		}
+	}
+	// A 200 response with an empty-ish body and zero fingerprint matches is a parked
+	// / not-yet-deployed vhost; scanning often still finds the real app.
+	if noMatch && status == http.StatusOK && len(body) < 256 {
+		return true, "blank"
+	}
+	return false, ""
 }
 
 var reTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)

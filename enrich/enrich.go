@@ -9,6 +9,7 @@ package enrich
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -31,9 +32,10 @@ const (
 )
 
 type job struct {
-	kind jobKind
-	id   int64  // asset id (domain for DNS, site for HTTP)
-	arg  string // host (DNS) or url (HTTP)
+	kind   jobKind
+	id     int64  // asset id (domain for DNS, site for HTTP)
+	arg    string // host (DNS) or url (HTTP)
+	taskID int64  // owning task (0 = global); used for attribution + assets-only gating
 }
 
 // Engine owns the resolver, the proxy-routed HTTP client, and the worker pool.
@@ -55,6 +57,16 @@ type Engine struct {
 	hostLocks   map[string]*sync.Mutex
 	hostLast    map[string]time.Time
 	hostBlocked sync.Map // host -> time.Time (unblock time)
+
+	// Directory scanning (default-page auto follow-up + probe_directories tool).
+	// scanSem bounds concurrent scans so a batch of parked default-page vhosts
+	// cannot flood targets; scanSeen throttles auto-scans per host; scanLocks
+	// serializes scans per host (probes keep their own pacing — a scan must not
+	// hold hostLocks for its whole run and starve the enrichment workers).
+	scanSem   chan struct{}
+	scanSeen  sync.Map // host -> time.Time (last auto scan)
+	scanMu    sync.Mutex
+	scanLocks map[string]*sync.Mutex
 }
 
 const (
@@ -72,6 +84,18 @@ const (
 	// maxBackoffCooldown caps Retry-After so one bogus header cannot park a host
 	// indefinitely.
 	maxBackoffCooldown = 6 * time.Hour
+
+	// autoScanCooldown throttles automatic directory scans per host: a default page
+	// triggers one scan, and the same host is not rescanned for this long.
+	autoScanCooldown = 12 * time.Hour
+	// autoScanBudget caps one automatic scan so a huge/slow site cannot pin a scan
+	// slot indefinitely.
+	autoScanBudget = 3 * time.Minute
+	// autoScanSlots bounds concurrent automatic scans (distinct from enrich workers).
+	autoScanSlots = 2
+	// maxRecordedFindings caps how many discovered paths are registered as service
+	// assets per scan (the tool still returns every finding).
+	maxRecordedFindings = 25
 )
 
 // New builds the engine. proxy() returns the recording-proxy address to route HTTP
@@ -99,6 +123,7 @@ func New(as *db.AssetStore, proxy func() string, workers int) *Engine {
 		jobs:     make(chan job, queueSize),
 		closed:   make(chan struct{}),
 		hostLast: make(map[string]time.Time),
+		scanSem:  make(chan struct{}, autoScanSlots),
 	}
 	for i := 0; i < workers; i++ {
 		go e.worker()
@@ -141,10 +166,14 @@ func buildClient(proxy func() string) *http.Client {
 
 // ResolveDomain enqueues a DNS resolution for a domain asset (ungated). host is the
 // FQDN. No-op for an empty engine.
-func (e *Engine) ResolveDomain(id int64, host string) { e.enqueue(job{jobDNS, id, host}) }
+func (e *Engine) ResolveDomain(id int64, host string) { e.enqueue(job{jobDNS, id, host, 0}) }
 
-// ProbeSite enqueues an HTTP probe for a web-asset (site). rawURL is the site URL.
-func (e *Engine) ProbeSite(id int64, rawURL string) { e.enqueue(job{jobHTTP, id, rawURL}) }
+// ProbeSite enqueues an HTTP probe for a web-asset (site). rawURL is the site URL;
+// taskID is the owning task (0 = global) so a default-page follow-up scan inherits
+// the right attribution and respects the task's assets-only mode.
+func (e *Engine) ProbeSite(id int64, rawURL string, taskID int64) {
+	e.enqueue(job{jobHTTP, id, rawURL, taskID})
+}
 
 func (e *Engine) enqueue(j job) {
 	if e == nil || id0(j.id) || j.arg == "" {
@@ -180,7 +209,7 @@ func (e *Engine) worker() {
 			case jobDNS:
 				e.doDNS(j.id, j.arg)
 			case jobHTTP:
-				e.doHTTP(j.id, j.arg)
+				e.doHTTP(j.id, j.arg, j.taskID)
 			}
 		}
 	}
@@ -211,6 +240,23 @@ func (e *Engine) hostLock(host string) *sync.Mutex {
 	if !ok {
 		m = &sync.Mutex{}
 		e.hostLocks[host] = m
+	}
+	return m
+}
+
+// scanLock returns the per-host scan mutex, creating it on demand. Scans do not
+// take hostLocks: they are long, and blocking the enrichment workers behind a scan
+// would stall unrelated probes on the same host.
+func (e *Engine) scanLock(host string) *sync.Mutex {
+	e.scanMu.Lock()
+	defer e.scanMu.Unlock()
+	if e.scanLocks == nil {
+		e.scanLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := e.scanLocks[host]
+	if !ok {
+		m = &sync.Mutex{}
+		e.scanLocks[host] = m
 	}
 	return m
 }
@@ -334,7 +380,7 @@ func (e *Engine) doDNS(id int64, host string) {
 // doHTTP performs one read-only GET (plus favicon) and writes back status/title/
 // technologies/favicon hash. This is what makes "采集到站点即识别指纹" automatic:
 // every inserted service URL is enriched without the agent having to re-probe it.
-func (e *Engine) doHTTP(id int64, rawURL string) {
+func (e *Engine) doHTTP(id int64, rawURL string, taskID int64) {
 	host := hostOf(rawURL)
 	if host == "" {
 		return
@@ -361,7 +407,120 @@ func (e *Engine) doHTTP(id int64, rawURL string) {
 		ContentLength: &bodyLen,
 		PageTitle:     obs.PageTitle,
 		FaviconMMH3:   obs.FaviconMMH3,
+		TaskID:        taskID,
 	})
+	// A stock default page (nginx/apache/IIS welcome page, empty 宝塔 vhost, blank
+	// page) tells us nothing about what is actually deployed. Follow up with a paced
+	// directory scan to find the real backend / fingerprint-revealing consoles.
+	if obs.DefaultPage {
+		e.maybeAutoScan(rawURL, taskID, obs.DefaultPageKind)
+	}
+}
+
+// ---- directory probing ----
+
+// ScanDirectories runs a bounded directory scan against one site, serialized with
+// the host's other enrichment traffic. Callers (the probe_directories tool) get the
+// findings synchronously; auto-scans call it through maybeAutoScan.
+func (e *Engine) ScanDirectories(ctx context.Context, rawURL string, extra []string, maxPaths int) (*fingerprint.DirScanResult, error) {
+	if e == nil {
+		return nil, fmt.Errorf("enrich engine unavailable")
+	}
+	host := hostOf(rawURL)
+	if host == "" {
+		return nil, fmt.Errorf("无效的站点 URL：%q", rawURL)
+	}
+	if e.hostBlockedNow(host) {
+		return nil, fmt.Errorf("主机 %s 处于退避期，暂不目录探测", host)
+	}
+	// One scan per host at a time (auto follow-up and an explicit tool call must
+	// not overlap). Plain probes keep their own pacing and may interleave.
+	mu := e.scanLock(host)
+	mu.Lock()
+	defer mu.Unlock()
+	res, err := fingerprint.ScanDirectories(ctx, e.client, rawURL, fingerprint.DirScanOptions{
+		ExtraPaths: extra,
+		MaxPaths:   maxPaths,
+	})
+	if res != nil && res.Backoff > 0 {
+		e.markHostBlocked(host, res.Backoff)
+		log.Printf("[enrich] %s 目录探测收到限流，暂停该主机 %s", rawURL, res.Backoff)
+	}
+	return res, err
+}
+
+// maybeAutoScan schedules an automatic directory scan for a default-page site. It
+// is best-effort: throttled per host, bounded by a global slot count, skipped in
+// assets-only tasks (those must never request paths).
+func (e *Engine) maybeAutoScan(rawURL string, taskID int64, kind string) {
+	host := hostOf(rawURL)
+	if host == "" || e.hostBlockedNow(host) {
+		return
+	}
+	if e.as != nil && taskID > 0 && e.as.AssetsOnly(taskID) {
+		log.Printf("[enrich] %s 是默认页(%s)，但任务是『仅资产』模式，跳过目录探测", rawURL, kind)
+		return
+	}
+	if v, ok := e.scanSeen.Load(host); ok {
+		if t, _ := v.(time.Time); ok && time.Since(t) < autoScanCooldown {
+			return
+		}
+	}
+	e.scanSeen.Store(host, time.Now())
+	log.Printf("[enrich] %s 是默认页(%s)，自动目录探测", rawURL, kind)
+	go func() {
+		select {
+		case e.scanSem <- struct{}{}:
+			defer func() { <-e.scanSem }()
+		case <-e.closed:
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), autoScanBudget)
+		defer cancel()
+		res, err := e.ScanDirectories(ctx, rawURL, nil, 0)
+		if err != nil {
+			log.Printf("[enrich] %s 自动目录探测失败：%v", rawURL, err)
+			return
+		}
+		added := e.recordScanFindings(rawURL, res, taskID)
+		log.Printf("[enrich] %s 自动目录探测完成：扫 %d，命中 %d，登记服务资产 %d，技术栈 %v",
+			rawURL, res.Scanned, len(res.Findings), added, res.Technologies)
+	}()
+}
+
+// recordScanFindings registers discovered paths as HTTP service assets (same task
+// attribution as the parent) and merges the discovered technologies back onto the
+// probed site, so the 服务 tab and the site's fingerprint reflect the findings.
+func (e *Engine) recordScanFindings(parentURL string, res *fingerprint.DirScanResult, taskID int64) int {
+	if e.as == nil || res == nil {
+		return 0
+	}
+	added := 0
+	for i, f := range res.Findings {
+		if i >= maxRecordedFindings {
+			break
+		}
+		status := f.StatusCode
+		length := f.ContentLength
+		if _, err := e.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
+			URL:           f.URL,
+			Technologies:  f.Technologies,
+			StatusCode:    &status,
+			ContentLength: &length,
+			PageTitle:     f.PageTitle,
+			TaskID:        taskID,
+		}); err == nil {
+			added++
+		}
+	}
+	if len(res.Technologies) > 0 {
+		_, _ = e.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
+			URL:          parentURL,
+			Technologies: res.Technologies,
+			TaskID:       taskID,
+		})
+	}
+	return added
 }
 
 func hostOf(rawURL string) string {

@@ -1675,7 +1675,7 @@ func (s *Server) seed(t *Task, text string) {
 			_ = as.SetTaskAssetSource(taskID, rootID, "task", "由任务描述或目标初始化", nil)
 			// 初始站点同样自动探测指纹/系统（与 Agent 采集落库一致）。
 			if eng := s.m.Enrich(); eng != nil {
-				eng.ProbeSite(rootID, u)
+				eng.ProbeSite(rootID, u, taskID)
 			}
 		}
 	}

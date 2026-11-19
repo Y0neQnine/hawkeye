@@ -364,7 +364,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				// 站点一落库就异步探测：抓首页/响应头/favicon 并识别系统指纹，
 				// 无需 worker 再手工 curl 一遍。同 URL 5 分钟内只探一次。
 				if typ == "service" && item.URL != "" && t.enrich != nil {
-					t.enrich.ProbeSite(id, item.URL)
+					t.enrich.ProbeSite(id, item.URL, taskID)
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++
@@ -671,7 +671,7 @@ func splitLines(s string) []string {
 
 // WorkerTools returns the tool set for a work agent.
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	tools := []actool.CoreTool{
 		t.recordFact(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
@@ -685,11 +685,17 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
+	// probe_directories：站点只有默认页时探常见后台/指纹目录。『仅资产』模式禁止
+	// 任何路径请求，故不进工具列表。
+	if !t.assetsOnly {
+		tools = append(tools, t.probeDirectories())
+	}
+	return tools
 }
 
 // MainAgentTools returns the human-interface tool set.
 func (t *ToolSet) MainAgentTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	tools := []actool.CoreTool{
 		t.graphOverview(), t.listFacts(), t.nodeDetail(),
 		t.expandDigest(), // cold-digest §6.1
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.addHint(), t.addIntent(),
@@ -706,6 +712,10 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		// list_untested_assets：按需查本任务范围内未采资产(类型+分页)，自行决定补采。
 		t.listUntestedAssets(),
 	}
+	if !t.assetsOnly {
+		tools = append(tools, t.probeDirectories())
+	}
+	return tools
 }
 
 // AllDomainTools returns the union of all domain tools across all agent types,
