@@ -1462,7 +1462,17 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 		})
 	}
 	m.mu.Unlock()
+	m.scheduleLiveness(n)
 	return true, nil
+}
+
+// scheduleLiveness kicks the post-collection liveness sweep once a task reaches
+// a terminal status (done/failed/timeout). Skipped for non-terminal statuses and
+// when the enrichment engine is unavailable; enrich dedupes per task.
+func (m *Manager) scheduleLiveness(taskID int64) {
+	if m.enrich != nil {
+		m.enrich.ProbeTaskLiveness(taskID)
+	}
 }
 
 // SetTaskStatus persists a task's lifecycle status (e.g. "done") and reflects it
@@ -1493,6 +1503,9 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 		})
 	}
 	m.mu.Unlock()
+	if pgdb.IsTerminal(status) {
+		m.scheduleLiveness(n)
+	}
 	return nil
 }
 

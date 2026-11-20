@@ -376,6 +376,36 @@ export default function AssetsPage() {
     );
   };
 
+  // 存活探测结果由任务收尾后的统一探测写回 extra（alive/alive_at/alive_reason）。
+  const liveTitle = (a: Asset) => {
+    const reason = typeof a.extra?.alive_reason === "string" ? a.extra.alive_reason : "";
+    const at = typeof a.extra?.alive_at === "string" ? a.extra.alive_at : "";
+    return [reason, at && `探测于 ${new Date(at).toLocaleString()}`].filter(Boolean).join(" · ") || "尚未探测";
+  };
+
+  const liveCell = (a: Asset) => {
+    const alive = a.extra?.alive;
+    if (alive === true) {
+      return (
+        <Badge className="bg-emerald-100 text-[10px] font-normal text-emerald-700" title={liveTitle(a)}>
+          存活
+        </Badge>
+      );
+    }
+    if (alive === false) {
+      return (
+        <Badge variant="destructive" className="text-[10px] font-normal" title={liveTitle(a)}>
+          失活
+        </Badge>
+      );
+    }
+    return (
+      <span className="text-xs text-muted-foreground" title="尚未探测">
+        —
+      </span>
+    );
+  };
+
   const tabCounts: Record<string, number> = { ...counts, company: companies.length };
   const totalAssets = Object.values(counts).reduce((a, b) => a + b, 0);
   const visibleTabs = companyView ? TABS.filter((t) => t.key !== "company") : TABS;
@@ -548,7 +578,7 @@ export default function AssetsPage() {
         <TabsContent value="root_domain" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "域名", "ICP 备案", "归属企业", ""]}
+            cols={["", "域名", "ICP 备案", "存活", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -566,6 +596,7 @@ export default function AssetsPage() {
                 </TableCell>
                 <TableCell className="font-mono text-xs font-medium">{a.domain}</TableCell>
                 <TableCell className="text-xs">{a.icp || "—"}</TableCell>
+                <TableCell>{liveCell(a)}</TableCell>
                 <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
@@ -587,7 +618,7 @@ export default function AssetsPage() {
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "IP", "C段", "标签", "绑定域名", "开放端口", "归属企业", ""]}
+            cols={["", "IP", "C段", "标签", "绑定域名", "开放端口", "存活", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -617,6 +648,7 @@ export default function AssetsPage() {
                     mono
                   />
                 </TableCell>
+                <TableCell>{liveCell(a)}</TableCell>
                 <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
@@ -638,7 +670,7 @@ export default function AssetsPage() {
         <TabsContent value="subdomain" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "域名", "根域名", "解析类型", "解析值", "归属企业", ""]}
+            cols={["", "域名", "根域名", "解析类型", "解析值", "存活", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -660,6 +692,7 @@ export default function AssetsPage() {
                 <TableCell className="max-w-xs truncate font-mono text-xs">
                   {(Array.isArray(a.record_value) ? a.record_value.join(", ") : a.record_value) || "—"}
                 </TableCell>
+                <TableCell>{liveCell(a)}</TableCell>
                 <TableCell>{companyCell(a)}</TableCell>
                 <TableCell className="w-8 pl-0">
                   <Button
@@ -814,7 +847,7 @@ export default function AssetsPage() {
         <TabsContent value="service" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
           {searchBox}
           <AssetCard
-            cols={["", "服务", "域名", "IP", "端口", "状态码", "标题", "指纹", "认证", "归属企业", ""]}
+            cols={["", "服务", "域名", "IP", "端口", "状态码", "标题", "指纹", "认证", "存活", "归属企业", ""]}
             loaded={loaded}
             total={total}
             page={page}
@@ -889,6 +922,7 @@ export default function AssetsPage() {
                       })
                     )}
                   </TableCell>
+                  <TableCell>{liveCell(a)}</TableCell>
                   <TableCell>{companyCell(a)}</TableCell>
                   <TableCell className="w-8 pl-0">
                     <Button

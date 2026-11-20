@@ -67,6 +67,9 @@ type Engine struct {
 	scanSeen  sync.Map // host -> time.Time (last auto scan)
 	scanMu    sync.Mutex
 	scanLocks map[string]*sync.Mutex
+
+	// Post-collection liveness sweep: one entry per task (task id -> last start).
+	liveSeen sync.Map
 }
 
 const (

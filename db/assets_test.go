@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -1375,5 +1376,99 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 	}
 	if !sawOut {
 		t.Fatalf("taskID<=0 should fall back to global and include out-of-scope asset %d", outIDs[0])
+	}
+}
+
+// =====================================================================
+// 存活探测
+// =====================================================================
+
+func TestLivenessTargetsAndWriteback(t *testing.T) {
+	d, as, _ := testSetup(t)
+	defer d.Close()
+
+	suffix := time.Now().UnixNano()
+	task, err := d.CreateTask(fmt.Sprintf("liveness %d", suffix), "collect", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+
+	ipID, err := as.UpsertIP(UpsertIPReq{
+		IP:        "198.18.9.77",
+		OpenPorts: []PortService{{Port: 443, Service: "https"}, {Port: 80, Service: "http"}},
+		TaskID:    task.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, ipID)
+
+	svcURL := fmt.Sprintf("http://liveness-%d.example", suffix)
+	svcID, err := as.UpsertHTTPService(UpsertHTTPServiceReq{URL: svcURL, TaskID: task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, svcID)
+
+	subDomain := fmt.Sprintf("sub-%d.lvetest.net", suffix)
+	var subID int64
+	if err := d.QueryRow(`INSERT INTO assets(type, domain, root_domain, task_ids)
+VALUES ('subdomain', $1, 'lvetest.net', ARRAY[$2]::bigint[]) RETURNING id`, subDomain, task.ID).Scan(&subID); err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, subID)
+
+	targets, err := as.ListLivenessTargets(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[int64]LivenessTarget, len(targets))
+	for _, tgt := range targets {
+		byID[tgt.ID] = tgt
+	}
+	ipTgt, ok := byID[ipID]
+	if !ok {
+		t.Fatalf("ip target missing from %+v", targets)
+	}
+	if len(ipTgt.OpenPorts) != 2 || ipTgt.OpenPorts[0] != 443 || ipTgt.OpenPorts[1] != 80 {
+		t.Fatalf("open_ports = %v, want [443 80]", ipTgt.OpenPorts)
+	}
+	if subTgt, ok := byID[subID]; !ok || subTgt.Domain != subDomain {
+		t.Fatalf("subdomain target = %+v (present=%v)", subTgt, ok)
+	}
+	if svcTgt, ok := byID[svcID]; !ok || svcTgt.URL != svcURL {
+		t.Fatalf("service target = %+v (present=%v)", svcTgt, ok)
+	}
+
+	readExtra := func(id int64) map[string]any {
+		t.Helper()
+		var raw string
+		if err := d.QueryRow(`SELECT extra::text FROM assets WHERE id = $1`, id).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	at := time.Now().UTC().Truncate(time.Second)
+	if err := as.SetLiveness(svcID, true, "HTTP 200", at); err != nil {
+		t.Fatal(err)
+	}
+	extra := readExtra(svcID)
+	if extra["alive"] != true || extra["alive_reason"] != "HTTP 200" || extra["alive_at"] != at.Format(time.RFC3339) {
+		t.Fatalf("extra after alive = %+v", extra)
+	}
+
+	later := at.Add(time.Minute)
+	if err := as.SetLiveness(svcID, false, "HTTP 请求失败：timeout", later); err != nil {
+		t.Fatal(err)
+	}
+	extra = readExtra(svcID)
+	if extra["alive"] != false || extra["alive_reason"] != "HTTP 请求失败：timeout" || extra["alive_at"] != later.Format(time.RFC3339) {
+		t.Fatalf("extra after dead = %+v", extra)
 	}
 }

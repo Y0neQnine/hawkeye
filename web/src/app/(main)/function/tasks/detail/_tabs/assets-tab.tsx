@@ -399,6 +399,36 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     );
   };
 
+  // 存活探测结果由任务收尾后的统一探测写回 extra（alive/alive_at/alive_reason）。
+  const liveTitle = (asset: Asset) => {
+    const reason = typeof asset.extra?.alive_reason === "string" ? asset.extra.alive_reason : "";
+    const at = typeof asset.extra?.alive_at === "string" ? asset.extra.alive_at : "";
+    return [reason, at && `探测于 ${new Date(at).toLocaleString()}`].filter(Boolean).join(" · ") || "尚未探测";
+  };
+
+  const liveCell = (asset: Asset) => {
+    const alive = asset.extra?.alive;
+    if (alive === true) {
+      return (
+        <Badge className="bg-emerald-100 font-normal text-[10px] text-emerald-700" title={liveTitle(asset)}>
+          存活
+        </Badge>
+      );
+    }
+    if (alive === false) {
+      return (
+        <Badge variant="destructive" className="font-normal text-[10px]" title={liveTitle(asset)}>
+          失活
+        </Badge>
+      );
+    }
+    return (
+      <span className="text-muted-foreground text-xs" title="尚未探测">
+        —
+      </span>
+    );
+  };
+
   React.useEffect(() => {
     setPage(0);
     setRows([]);
@@ -548,11 +578,12 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         {searchBox}
 
         <TabsContent value="root_domain" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["域名", "ICP 备案", "归属企业", "来源", "操作"]} {...commonCardProps}>
+          <AssetCard cols={["域名", "ICP 备案", "存活", "归属企业", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
                 <TableCell className="font-medium font-mono text-xs">{asset.domain}</TableCell>
                 <TableCell className="text-xs">{asset.icp || "—"}</TableCell>
+                <TableCell>{liveCell(asset)}</TableCell>
                 <TableCell>{companyCell(asset)}</TableCell>
                 <TableCell>
                   <SourceCell asset={asset} />
@@ -565,7 +596,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
 
         <TabsContent value="ip" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard
-            cols={["IP", "C段", "标签", "绑定域名", "开放端口", "归属企业", "来源", "操作"]}
+            cols={["IP", "C段", "标签", "绑定域名", "开放端口", "存活", "归属企业", "来源", "操作"]}
             {...commonCardProps}
           >
             {rows.map((asset) => (
@@ -586,6 +617,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
                     mono
                   />
                 </TableCell>
+                <TableCell>{liveCell(asset)}</TableCell>
                 <TableCell>{companyCell(asset)}</TableCell>
                 <TableCell>
                   <SourceCell asset={asset} />
@@ -597,7 +629,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="subdomain" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <AssetCard cols={["域名", "根域名", "解析类型", "解析值", "归属企业", "来源", "操作"]} {...commonCardProps}>
+          <AssetCard cols={["域名", "根域名", "解析类型", "解析值", "存活", "归属企业", "来源", "操作"]} {...commonCardProps}>
             {rows.map((asset) => (
               <TableRow key={asset.id}>
                 <TableCell className="font-medium font-mono text-xs">{asset.domain}</TableCell>
@@ -606,6 +638,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
                 <TableCell className="max-w-xs truncate font-mono text-xs">
                   {(Array.isArray(asset.record_value) ? asset.record_value.join(", ") : asset.record_value) || "—"}
                 </TableCell>
+                <TableCell>{liveCell(asset)}</TableCell>
                 <TableCell>{companyCell(asset)}</TableCell>
                 <TableCell>
                   <SourceCell asset={asset} />
@@ -669,7 +702,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
 
         <TabsContent value="service" className="mt-0 flex min-h-0 flex-1 flex-col">
           <AssetCard
-            cols={["地址 / 服务", "状态码", "标题", "响应长度", "指纹", "认证", "归属企业", "来源", "操作"]}
+            cols={["地址 / 服务", "状态码", "标题", "响应长度", "指纹", "认证", "存活", "归属企业", "来源", "操作"]}
             {...commonCardProps}
           >
             {rows.map((asset) => {
@@ -716,6 +749,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
                       })
                     )}
                   </TableCell>
+                  <TableCell>{liveCell(asset)}</TableCell>
                   <TableCell>{companyCell(asset)}</TableCell>
                   <TableCell>
                     <SourceCell asset={asset} />

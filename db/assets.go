@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // =====================================================================
@@ -1507,6 +1509,88 @@ func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
 	var n int
 	err := s.db.QueryRow(q, args...).Scan(&n)
 	return n, err
+}
+
+// =====================================================================
+// 存活探测
+// =====================================================================
+
+// LivenessTarget is the minimal asset projection needed by the post-collection
+// liveness sweep: domains resolve by name, IPs dial TCP, service URLs take one
+// GET (services without a URL fall back to ip:port).
+type LivenessTarget struct {
+	ID        int64
+	Type      string
+	Domain    string
+	IP        string
+	URL       string
+	Port      int
+	OpenPorts []int
+}
+
+// ListLivenessTargets returns the task's probeable assets (domains, IPs and
+// services) for the liveness sweep that runs once the task settles.
+func (s *AssetStore) ListLivenessTargets(taskID int64) ([]LivenessTarget, error) {
+	rows, err := s.db.Query(`
+SELECT id, type, COALESCE(domain,''), COALESCE(ip,''), COALESCE(url,''),
+       COALESCE(port,0), array_to_json(open_ports)::text
+FROM assets
+WHERE $1 = ANY(task_ids)
+  AND type IN ('root_domain','subdomain','ip','service')`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LivenessTarget
+	for rows.Next() {
+		var t LivenessTarget
+		var portsJSON string
+		if err := rows.Scan(&t.ID, &t.Type, &t.Domain, &t.IP, &t.URL, &t.Port, &portsJSON); err != nil {
+			return nil, err
+		}
+		t.OpenPorts = parseOpenPortNumbers(portsJSON)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// parseOpenPortNumbers extracts numeric ports from the open_ports JSONB array
+// (elements are written as {"port":80,"service":"http"}, but port may be a
+// string in imported data).
+func parseOpenPortNumbers(raw string) []int {
+	var items []map[string]any
+	if raw == "" || json.Unmarshal([]byte(raw), &items) != nil {
+		return nil
+	}
+	seen := make(map[int]bool, len(items))
+	ports := make([]int, 0, len(items))
+	for _, it := range items {
+		var p int
+		switch v := it["port"].(type) {
+		case float64:
+			p = int(v)
+		case string:
+			p, _ = strconv.Atoi(v)
+		}
+		if p <= 0 || p > 65535 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		ports = append(ports, p)
+	}
+	return ports
+}
+
+// SetLiveness records one liveness probe result in the asset's extra JSON.
+// last_seen is intentionally left alone: it tracks collection time, and bumping
+// it here would reshuffle the asset lists on every sweep.
+func (s *AssetStore) SetLiveness(id int64, alive bool, reason string, checkedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE assets
+SET extra = COALESCE(extra, '{}'::jsonb) ||
+            jsonb_build_object('alive', $2::boolean, 'alive_at', $3::text, 'alive_reason', $4::text)
+WHERE id = $1`, id, alive, checkedAt.UTC().Format(time.RFC3339), reason)
+	return err
 }
 
 func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
