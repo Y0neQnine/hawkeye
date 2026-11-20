@@ -278,6 +278,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV3(); err != nil {
 		return fmt.Errorf("seed intercept rules v3: %w", err)
 	}
+	if err := d.seedDefaultInterceptRulesV4(); err != nil {
+		return fmt.Errorf("seed intercept rules v4: %w", err)
+	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
@@ -625,4 +628,32 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		return fmt.Errorf("rule %q: %w", name, err)
 	}
 	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// serviceLifecyclePattern covers stop/restart variants that the v1 shutdown rule
+// (`shutdown|reboot|halt|poweroff|init 0|6`) misses: service managers (systemctl,
+// service, pg_ctl), container runtime commands, the sysrq-trigger reboot trick and
+// killing init. Exported so the seeded regex is unit-testable without a DB.
+const serviceLifecyclePattern = `(?i)\bsystemctl\s+(?:stop|restart|disable|poweroff|reboot|halt|kexec)\b|\bservice\s+[\w.-]+\s+(?:stop|restart)\b|\bdocker\s+(?:stop|restart|kill)\b|\bpg_ctl\b[^|\n]{0,80}\b(?:stop|restart)\b|>\s*/proc/sysrq-trigger|\b(?:kill|pkill|killall)\s+(?:-9\s+)?(?:1|init)\b`
+
+// seedDefaultInterceptRulesV4 lands the service-lifecycle rule on existing DBs.
+// The v1 shutdown rule matched the bare words only, so commands such as
+// `systemctl restart nginx`, `docker stop app` or `echo b > /proc/sysrq-trigger`
+// passed it — an operational gap observed in collection runs.
+func (d *DB) seedDefaultInterceptRulesV4() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v4"); v == "done" {
+		return nil
+	}
+	const name = "[内置] 服务 / 主机停止与重启变体"
+	if _, err := d.Exec(`
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action)
+SELECT $1, true, 100, 'tool_input', 'regex', $2, 'deny', $3, false, 60, 'deny'
+WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
+		name,
+		serviceLifecyclePattern,
+		"禁止停止或重启服务/主机（systemctl stop/restart、service stop、docker stop/restart、pg_ctl stop、sysrq-trigger、kill init 等）",
+	); err != nil {
+		return fmt.Errorf("rule %q: %w", name, err)
+	}
+	return d.SetSetting("intercept_default_rules_v4", "done")
 }

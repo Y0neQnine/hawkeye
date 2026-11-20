@@ -240,20 +240,19 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			var errs []errEntry
 
 			// 资产闸门规则一次性载入；读取失败则跳过判定（不阻断插入）。
-			// 拦截规则 = 全局 ∪ 任务级 block；允许规则 = 任务级 allow。
-			blockRules, _ := t.as.ListAssetInterceptRules()
-			var allowRules []db.AssetInterceptRule
+			// 判定顺序：任务 block > 任务 allow(命中即放行，可覆盖全局) > 全局拦截。
+			globalRules, _ := t.as.ListAssetInterceptRules()
+			var taskBlock, taskAllow []db.AssetInterceptRule
 			if t.taskID > 0 {
 				if tb, ta, err := t.as.TaskInterceptRulesSplit(t.taskID); err == nil {
-					blockRules = append(blockRules, tb...)
-					allowRules = ta
+					taskBlock, taskAllow = tb, ta
 				}
 			}
 
 			for i, item := range a.Assets {
 				// 资产闸门：先拦截后允许，被拒的资产禁止插入（跳过 Upsert 及后续副作用）。
 				domains, ips, urls := assetInterceptCandidates(item)
-				if d := db.EvaluateAssetGate(blockRules, allowRules, domains, ips, urls); !d.Allowed {
+				if d := db.EvaluateAssetGate(globalRules, taskBlock, taskAllow, domains, ips, urls); !d.Allowed {
 					errs = append(errs, errEntry{
 						Index: i,
 						Error: fmt.Sprintf("资产 %s %s，已禁止插入", assetInputLabel(item), d.Reason),

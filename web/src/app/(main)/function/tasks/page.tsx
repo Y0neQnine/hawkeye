@@ -3277,7 +3277,7 @@ function CreateTaskSheet({
               <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
               <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
               <FieldDescription>
-                仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
+                仅对本任务生效，不写入全局规则。判定顺序：本任务的「拦截」命中即禁止测试（优先级最高）；否则若本任务配置了「允许」规则，命中任一条即放行——可覆盖全局拦截，都不命中则不允许测试；未配置任何允许规则时，命中全局拦截仍禁止。
               </FieldDescription>
             </Field>
             <Field>

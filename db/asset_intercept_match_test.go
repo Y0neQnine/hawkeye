@@ -28,6 +28,18 @@ func TestMatchAssetInterceptRules(t *testing.T) {
 			nil, []string{"203.0.113.5"}, nil, true, "203.0.113.5"},
 		{"模糊IP前缀命中", []AssetInterceptRule{rule("fuzzy_ip", "203.0.113.", true)},
 			nil, []string{"203.0.113.99"}, nil, true, "203.0.113.99"},
+		{"模糊IP按八位组边界不误伤", []AssetInterceptRule{rule("fuzzy_ip", "192.168.1.1", true)},
+			nil, []string{"192.168.1.10"}, nil, false, ""},
+		{"模糊IP全等命中", []AssetInterceptRule{rule("fuzzy_ip", "192.168.1.1", true)},
+			nil, []string{"192.168.1.1"}, nil, true, "192.168.1.1"},
+		{"模糊政府域名不误伤相似前缀", []AssetInterceptRule{rule("fuzzy_domain", ".gov", true)},
+			[]string{"cdn.govcdn.com"}, nil, nil, false, ""},
+		{"模糊教育域名不误伤相似前缀", []AssetInterceptRule{rule("fuzzy_domain", ".edu", true)},
+			[]string{"my.education.com"}, nil, nil, false, ""},
+		{"模糊域名按标签边界命中", []AssetInterceptRule{rule("fuzzy_domain", ".gov", true)},
+			[]string{"x.gov.hk"}, nil, nil, true, "x.gov.hk"},
+		{"全等域名忽略末尾点", []AssetInterceptRule{rule("exact_domain", "example.com", true)},
+			[]string{"example.com."}, nil, nil, true, "example.com."},
 		{"CIDR 命中", []AssetInterceptRule{rule("cidr", "192.168.0.0/16", true)},
 			nil, []string{"192.168.5.20"}, nil, true, "192.168.5.20"},
 		{"CIDR 不命中", []AssetInterceptRule{rule("cidr", "192.168.0.0/16", true)},
@@ -56,16 +68,16 @@ func TestMatchAssetInterceptRules(t *testing.T) {
 }
 
 func TestEvaluateAssetGate(t *testing.T) {
-	block := []AssetInterceptRule{rule("fuzzy_domain", ".gov.cn", true)}
+	global := []AssetInterceptRule{rule("fuzzy_domain", ".gov.cn", true)}
 	allow := []AssetInterceptRule{rule("fuzzy_domain", "example.com", true)}
 
-	// 1. 命中拦截规则 → 拒绝（拦截原因优先）。
-	if d := EvaluateAssetGate(block, allow, []string{"www.gov.cn"}, nil, nil); d.Allowed {
-		t.Fatal("命中拦截规则应被拒绝")
+	// 1. 命中全局拦截 → 拒绝（拦截原因优先）。
+	if d := EvaluateAssetGate(global, nil, allow, []string{"www.gov.cn"}, nil, nil); d.Allowed {
+		t.Fatal("命中全局拦截规则应被拒绝")
 	}
 
 	// 2. 未命中拦截、有允许规则但不命中 → 拒绝（不允许）。
-	d := EvaluateAssetGate(block, allow, []string{"foo.other.com"}, nil, nil)
+	d := EvaluateAssetGate(global, nil, allow, []string{"foo.other.com"}, nil, nil)
 	if d.Allowed {
 		t.Fatal("有白名单且不命中应被拒绝")
 	}
@@ -74,28 +86,45 @@ func TestEvaluateAssetGate(t *testing.T) {
 	}
 
 	// 3. 未命中拦截、命中允许规则 → 放行。
-	if d := EvaluateAssetGate(block, allow, []string{"api.example.com"}, nil, nil); !d.Allowed {
+	if d := EvaluateAssetGate(global, nil, allow, []string{"api.example.com"}, nil, nil); !d.Allowed {
 		t.Fatal("命中白名单应放行")
 	}
 
-	// 4. 无允许规则（白名单未启用）→ 未命中拦截即放行。
-	if d := EvaluateAssetGate(block, nil, []string{"foo.other.com"}, nil, nil); !d.Allowed {
-		t.Fatal("无白名单时未命中拦截应放行")
+	// 4. 无允许规则（白名单未启用）→ 未命中全局拦截即放行。
+	if d := EvaluateAssetGate(global, nil, nil, []string{"foo.other.com"}, nil, nil); !d.Allowed {
+		t.Fatal("无白名单时未命中全局拦截应放行")
 	}
 
 	// 5. 允许规则全部禁用 → 视为白名单未启用，放行。
 	disabledAllow := []AssetInterceptRule{rule("fuzzy_domain", "example.com", false)}
-	if d := EvaluateAssetGate(nil, disabledAllow, []string{"foo.other.com"}, nil, nil); !d.Allowed {
+	if d := EvaluateAssetGate(nil, nil, disabledAllow, []string{"foo.other.com"}, nil, nil); !d.Allowed {
 		t.Fatal("白名单全禁用时应放行")
 	}
 
-	// 6. 拦截优先于允许：同一目标既命中拦截又命中允许 → 拒绝。
+	// 6. 任务级允许覆盖全局拦截：客户本身就是 .gov.cn 时，任务白名单可放行。
 	if d := EvaluateAssetGate(
+		[]AssetInterceptRule{rule("fuzzy_domain", ".gov.cn", true)},
+		nil,
+		[]AssetInterceptRule{rule("exact_domain", "www.gov.cn", true)},
+		[]string{"www.gov.cn"}, nil, nil,
+	); !d.Allowed {
+		t.Fatal("任务级允许应覆盖全局拦截")
+	}
+
+	// 7. 任务级拦截最强：同时命中任务拦截与任务允许 → 拒绝。
+	if d := EvaluateAssetGate(
+		nil,
 		[]AssetInterceptRule{rule("fuzzy_domain", ".gov.cn", true)},
 		[]AssetInterceptRule{rule("fuzzy_domain", ".gov.cn", true)},
 		[]string{"www.gov.cn"}, nil, nil,
 	); d.Allowed {
-		t.Fatal("拦截应优先于允许")
+		t.Fatal("任务级拦截应优先于任务级允许")
+	}
+
+	// 8. 拒绝结果带上命中的具体目标，供请求侧提示。
+	d = EvaluateAssetGate(global, nil, nil, []string{"www.gov.cn"}, nil, nil)
+	if d.Allowed || d.Target != "www.gov.cn" {
+		t.Fatalf("拒绝应返回命中的目标，得到 %+v", d)
 	}
 }
 

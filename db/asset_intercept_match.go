@@ -41,6 +41,64 @@ func (r AssetInterceptRule) Reason() string {
 	return s
 }
 
+// normalizeDomain lowercases a candidate and drops the FQDN trailing dot so
+// "Example.COM." and "example.com" compare equal.
+func normalizeDomain(d string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+}
+
+// domainMatchesDelimited reports whether p occurs in d on label boundaries:
+// "x.gov.cn" matches ".gov" only when the suffix is the last label or is
+// followed by a dot, so "cdn.govcdn.com" and "my.education.com" do not match
+// ".gov"/".edu". A leading dot in p is the separator itself, so no further left
+// boundary is required.
+func domainMatchesDelimited(d, p string) bool {
+	d = normalizeDomain(d)
+	p = strings.ToLower(strings.TrimSpace(p))
+	if d == "" || p == "" {
+		return false
+	}
+	if d == strings.TrimPrefix(p, ".") {
+		return true
+	}
+	leftFree := strings.HasPrefix(p, ".")
+	for start := 0; start <= len(d); {
+		i := strings.Index(d[start:], p)
+		if i < 0 {
+			return false
+		}
+		i += start
+		end := i + len(p)
+		leftOK := leftFree || i == 0 || d[i-1] == '.'
+		rightOK := end == len(d) || d[end] == '.'
+		if leftOK && rightOK {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+// ipMatchesDelimited treats the pattern as an address prefix on octet
+// boundaries: "192.168.1." and "192.168.1" match 192.168.1.10, but
+// "192.168.1.1" matches only 192.168.1.1 itself.
+func ipMatchesDelimited(ip, p string) bool {
+	ip, p = strings.TrimSpace(ip), strings.TrimSpace(p)
+	if ip == "" || p == "" {
+		return false
+	}
+	if ip == p {
+		return true
+	}
+	if !strings.HasPrefix(ip, p) {
+		return false
+	}
+	if strings.HasSuffix(p, ".") {
+		return true
+	}
+	return len(ip) > len(p) && ip[len(p)] == '.'
+}
+
 // matchOne 判断单条启用规则是否命中给定的域名/IP/URL 候选串，返回命中的具体值。
 func matchOne(r AssetInterceptRule, domains, ips, urls []string) (string, bool) {
 	p := strings.TrimSpace(r.Pattern)
@@ -50,7 +108,7 @@ func matchOne(r AssetInterceptRule, domains, ips, urls []string) (string, bool) 
 	switch r.Kind {
 	case "exact_domain":
 		for _, d := range domains {
-			if strings.EqualFold(strings.TrimSpace(d), p) {
+			if normalizeDomain(d) == normalizeDomain(p) {
 				return d, true
 			}
 		}
@@ -67,15 +125,14 @@ func matchOne(r AssetInterceptRule, domains, ips, urls []string) (string, bool) 
 			}
 		}
 	case "fuzzy_domain":
-		lp := strings.ToLower(p)
 		for _, d := range domains {
-			if d != "" && strings.Contains(strings.ToLower(d), lp) {
+			if domainMatchesDelimited(d, p) {
 				return d, true
 			}
 		}
 	case "fuzzy_ip":
 		for _, ip := range ips {
-			if ip != "" && strings.Contains(ip, p) {
+			if ipMatchesDelimited(ip, p) {
 				return ip, true
 			}
 		}
@@ -169,27 +226,35 @@ func hasEnabledRule(rules []AssetInterceptRule) bool {
 	return false
 }
 
-// AssetGateDecision 是「先拦截后允许」闸门对一组候选串的判定结果。
+// AssetGateDecision 是资产闸门对一组候选串的判定结果。
 type AssetGateDecision struct {
 	Allowed bool
 	Reason  string // 被拒原因（不含资产标识）；Allowed=true 时为空
+	Target  string // 命中的具体域名/IP/URL；白名单拒绝时为空
 }
 
 // EvaluateAssetGate 执行任务级闸门判定：
-//  1. 命中任一启用的 blockRules → 拒绝（拦截原因）。
-//  2. 否则若 allowRules 存在启用项且都不命中 → 拒绝（不在允许范围）。
-//  3. 否则放行。
+//  1. 命中任一启用的任务级 block → 拒绝（任务拦截最强）。
+//  2. 任务存在启用的 allow(白名单)：命中则放行——即使同时命中全局规则；
+//     不命中则拒绝「不在允许范围」。
+//  3. 命中全局拦截 → 拒绝。
+//  4. 放行。
 //
-// allowRules 为空/无启用项时，允许闸门不生效（即不启用白名单，全部放行），
-// 避免「未配置允许规则」把所有资产挡掉。
-func EvaluateAssetGate(blockRules, allowRules []AssetInterceptRule, domains, ips, urls []string) AssetGateDecision {
-	if rule, _, ok := MatchAssetInterceptRules(blockRules, domains, ips, urls); ok {
-		return AssetGateDecision{Allowed: false, Reason: rule.Reason()}
+// 任务级 allow 覆盖全局内置规则，让获得授权的任务可以采集黑名单内的目标
+// （如客户本身就是 .edu.cn），而不必为单个任务关闭全局规则。
+// allow 为空/无启用项时白名单不生效（未配置允许规则不应挡掉全部资产）。
+func EvaluateAssetGate(globalRules, taskBlockRules, taskAllowRules []AssetInterceptRule, domains, ips, urls []string) AssetGateDecision {
+	if rule, v, ok := MatchAssetInterceptRules(taskBlockRules, domains, ips, urls); ok {
+		return AssetGateDecision{Allowed: false, Reason: rule.Reason(), Target: v}
 	}
-	if hasEnabledRule(allowRules) {
-		if _, _, ok := MatchAssetInterceptRules(allowRules, domains, ips, urls); !ok {
+	if hasEnabledRule(taskAllowRules) {
+		if _, _, ok := MatchAssetInterceptRules(taskAllowRules, domains, ips, urls); !ok {
 			return AssetGateDecision{Allowed: false, Reason: "不在任务允许(白名单)范围内，不允许测试"}
 		}
+		return AssetGateDecision{Allowed: true}
+	}
+	if rule, v, ok := MatchAssetInterceptRules(globalRules, domains, ips, urls); ok {
+		return AssetGateDecision{Allowed: false, Reason: rule.Reason(), Target: v}
 	}
 	return AssetGateDecision{Allowed: true}
 }
@@ -211,28 +276,27 @@ func (s *AssetStore) ListAssetInterceptRules() ([]AssetInterceptRule, error) {
 	return s.db.ListAssetInterceptRules()
 }
 
-// CheckAssetsIntercept 按 id 载入资产，逐个执行「先拦截后允许」闸门判定，返回所有
-// 被拒的资产。拦截规则 = 全局 ∪ 任务级 block；允许规则 = 任务级 allow（仅本任务）。
+// CheckAssetsIntercept 按 id 载入资产，逐个执行资产闸门判定，返回所有被拒的资产。
+// 拦截 = 任务级 block 优先，其次任务级 allow(命中即放行，可覆盖全局规则)，
+// 再次全局拦截；无任务上下文时只看全局规则。
 // 无 id 时快速返回。用全局 GetByIDs（不受任务范围过滤）以保证拦截不被 scope 削弱。
 func (s *AssetStore) CheckAssetsIntercept(taskID int64, ids []int64) ([]AssetInterceptHit, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	blockRules, err := s.db.ListAssetInterceptRules()
+	globalRules, err := s.db.ListAssetInterceptRules()
 	if err != nil {
 		return nil, err
 	}
-	var allowRules []AssetInterceptRule
+	var taskBlock, taskAllow []AssetInterceptRule
 	if taskID > 0 {
-		tb, ta, err := s.TaskInterceptRulesSplit(taskID)
+		taskBlock, taskAllow, err = s.TaskInterceptRulesSplit(taskID)
 		if err != nil {
 			return nil, err
 		}
-		blockRules = append(blockRules, tb...)
-		allowRules = ta
 	}
-	// 既无拦截规则、也无启用的允许规则 → 无需判定，全部放行。
-	if len(blockRules) == 0 && !hasEnabledRule(allowRules) {
+	// 既无任何启用规则、也无启用的允许规则 → 无需判定，全部放行。
+	if !hasEnabledRule(globalRules) && !hasEnabledRule(taskBlock) && !hasEnabledRule(taskAllow) {
 		return nil, nil
 	}
 	assets, err := s.GetByIDs(ids)
@@ -242,7 +306,7 @@ func (s *AssetStore) CheckAssetsIntercept(taskID int64, ids []int64) ([]AssetInt
 	var hits []AssetInterceptHit
 	for _, a := range assets {
 		domains, ips, urls := a.interceptCandidates()
-		if d := EvaluateAssetGate(blockRules, allowRules, domains, ips, urls); !d.Allowed {
+		if d := EvaluateAssetGate(globalRules, taskBlock, taskAllow, domains, ips, urls); !d.Allowed {
 			hits = append(hits, AssetInterceptHit{Asset: a, Reason: d.Reason})
 		}
 	}

@@ -1223,8 +1223,9 @@ CREATE TRIGGER trg_asset_intercept_rules_upd BEFORE UPDATE ON asset_intercept_ru
 -- 与全局 asset_intercept_rules 同构（kind/pattern/note/enabled），但按 task_id
 -- 关联、随任务级联删除；创建任务时录入、任务详情里可编辑。
 -- action: 'block'=拦截(禁止测试)  'allow'=允许(白名单)。
--- 执行判定：先按 拦截规则(全局 ∪ 任务block) 匹配，命中即禁止；未命中且该任务存在
--- 启用的 allow 规则时，须命中某条 allow 才放行，否则「不允许测试」。
+-- 执行判定：任务级 block 命中即禁止(最强)；否则任务存在启用的 allow 规则时，
+-- 命中任一条即放行(可覆盖全局拦截)，都不命中则「不允许测试」；未配置 allow 时
+-- 再按全局拦截规则判定。
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS task_intercept_rules (
     id          BIGSERIAL PRIMARY KEY,

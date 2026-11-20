@@ -44,3 +44,37 @@ func TestDeleteEndpointPathPattern(t *testing.T) {
 		}
 	}
 }
+
+// v4 规则同时匹配 tool_input 整个 JSON 串；用例按该形态给出。
+func TestServiceLifecyclePattern(t *testing.T) {
+	re := regexp.MustCompile(serviceLifecyclePattern)
+
+	hit := []string{
+		`{"command":"systemctl restart nginx"}`,
+		`{"command":"sudo systemctl stop docker"}`,
+		`{"command":"service nginx restart"}`,
+		`{"command":"docker restart app"}`,
+		`{"command":"pg_ctl -D /var/lib/pgsql stop"}`,
+		`{"command":"echo b > /proc/sysrq-trigger"}`,
+		`{"command":"kill -9 1"}`,
+		`{"command":"killall -9 init"}`,
+	}
+	for _, s := range hit {
+		if !re.MatchString(s) {
+			t.Errorf("应命中却放行: %s", s)
+		}
+	}
+
+	miss := []string{
+		`{"command":"systemctl status nginx"}`,
+		`{"command":"docker ps"}`,
+		`{"command":"kill -9 12345"}`,
+		`{"command":"cat /proc/sysrq-trigger"}`,
+		`{"command":"curl https://example.com/services/list"}`,
+	}
+	for _, s := range miss {
+		if re.MatchString(s) {
+			t.Errorf("误拦: %s", s)
+		}
+	}
+}

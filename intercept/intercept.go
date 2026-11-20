@@ -140,10 +140,14 @@ func (i *Interceptor) SetReviewer(r Reviewer) {
 
 // defaultEnabledTools is the hard-coded set of tools that enter the intercept
 // rule system when no intercept_enabled_tools setting has been saved.
+//
+// Write/Edit/MultiEdit are intentionally absent: their input is the whole file
+// body, so collecting a script or report that merely mentions shutdown/DELETE
+// tripped the command rules. Execution surfaces (Bash, WebFetch, shell_*)
+// still cover what actually runs; users can add the editing tools back in the UI.
 var defaultEnabledTools = []string{
 	"Bash", "WebFetch", "web_search",
 	"shell_open", "shell_send",
-	"Write", "Edit", "MultiEdit",
 }
 
 // New creates an Interceptor backed by d. The rule cache is lazy-loaded on
@@ -279,6 +283,35 @@ func (i *Interceptor) SetEnabledTools(tools []string) error {
 	}
 	i.Invalidate()
 	return nil
+}
+
+// AssetGate evaluates the asset blocklist for candidate domains/IPs/URLs. It is
+// the request-side counterpart to insert_assets: URL-bearing tool calls (Bash,
+// WebFetch, probe_directories) are checked before any request leaves the host.
+// The task comes from ctx (WithTaskContext); without it only global rules apply.
+// A failing rule read fails open — collection must not stall on a DB hiccup.
+func (i *Interceptor) AssetGate(ctx context.Context, domains, ips, urls []string) (target, reason string, blocked bool) {
+	if i == nil || i.db == nil {
+		return "", "", false
+	}
+	if len(domains)+len(ips)+len(urls) == 0 {
+		return "", "", false
+	}
+	globalRules, err := i.db.ListAssetInterceptRules()
+	if err != nil {
+		return "", "", false
+	}
+	var taskBlock, taskAllow []db.AssetInterceptRule
+	if tid, _ := taskInfoFromCtx(ctx); tid != "" {
+		if n, err := strconv.ParseInt(tid, 10, 64); err == nil && n > 0 {
+			taskBlock, taskAllow, _ = i.db.Assets().TaskInterceptRulesSplit(n)
+		}
+	}
+	dec := db.EvaluateAssetGate(globalRules, taskBlock, taskAllow, domains, ips, urls)
+	if dec.Allowed {
+		return "", "", false
+	}
+	return dec.Target, dec.Reason, true
 }
 
 // Decision is the outcome of a successful rule match.

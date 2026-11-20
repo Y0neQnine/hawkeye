@@ -1111,7 +1111,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
         <CardTitle className="flex items-center gap-2 text-base">
           <ShieldCheckIcon className="size-4 text-sky-500" /> 任务级资产拦截 / 允许
           <span className="text-muted-foreground text-xs font-normal">
-            （仅本任务生效，不进全局；先拦截后允许，共 {rules.length} 条）
+            （仅本任务生效，不进全局；任务拦截最强，任务允许可覆盖全局，共 {rules.length} 条）
           </span>
         </CardTitle>
       </CardHeader>
@@ -1254,7 +1254,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
           </div>
         ) : (
           <p className="text-muted-foreground text-sm">
-            暂无任务级规则。「拦截」命中即禁止测试；「允许」为白名单——配置后本任务只允许命中允许规则的资产（未配置则不启用白名单）。
+            暂无任务级规则。「拦截」命中即禁止测试；「允许」为白名单——配置后本任务只允许命中允许规则的资产，且可覆盖全局拦截（未配置则不启用白名单）。
           </p>
         )}
       </CardContent>

@@ -75,6 +75,11 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		cmd = in.Text
 	}
 	g.record(ev.ToolName, "allow", "", cmd)
+	// Asset blocklist first: no request may reach a blocked target, even if the
+	// command-rules path would allow the tool.
+	if res := g.applyAssetGate(ctx, ev); res.Decision == "block" {
+		return res
+	}
 	return g.applyIntercept(ctx, ev)
 }
 
